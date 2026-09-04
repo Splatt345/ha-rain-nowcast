@@ -118,6 +118,44 @@ def score_config(config, R=None, n_obs=12, n_lead=12):
     }
 
 
+def run_forecast(train, metadata, config, n_lead):
+    """Run STEPS on a raw mm/h `train` stack (most-recent-last) and return the
+    ensemble-mean forecast in mm/h, shape (n_lead, y, x). No verification -
+    used for live nowcasting where there's no future truth yet to score
+    against (see score_config, which wraps this for backtesting).
+    """
+    from pysteps import motion, nowcasts, utils
+
+    cfg = {**BASELINE_CONFIG, **config}
+
+    train_db, _ = utils.transformation.dB_transform(
+        train, metadata, threshold=0.1, zerovalue=-15.0
+    )
+    train_db[~np.isfinite(train_db)] = -15.0
+
+    oflow = motion.get_method(cfg["oflow_method"])
+    motion_field = oflow(train_db)
+
+    nowcast_method = nowcasts.get_method("steps")
+    forecast_db = nowcast_method(
+        train_db[-cfg["ar_context_frames"]:],
+        motion_field,
+        n_lead,
+        n_ens_members=cfg["n_ens_members"],
+        n_cascade_levels=cfg["n_cascade_levels"],
+        ar_order=cfg["ar_order"],
+        precip_thr=cfg["precip_thr_db"],
+        noise_method=cfg["noise_method"],
+        kmperpixel=metadata.get("xpixelsize", 1000.0) / 1000.0,
+        timestep=metadata.get("accutime", 5.0),
+        seed=42,
+    )
+    forecast = utils.transformation.dB_transform(
+        forecast_db, metadata, threshold=cfg["precip_thr_db"], inverse=True
+    )[0]
+    return np.nanmean(forecast, axis=0)
+
+
 BASELINE_CONFIG = {
     "n_ens_members": 6,
     "n_cascade_levels": 6,

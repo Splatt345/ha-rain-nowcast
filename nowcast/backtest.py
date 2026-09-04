@@ -157,7 +157,10 @@ def run_forecast(train, metadata, config, n_lead):
 
 
 BASELINE_CONFIG = {
-    "n_ens_members": 6,
+    # n_ens_members=12 per nowcast/optimize.py's guarded search (accepted:
+    # more ensemble members lowers Monte Carlo noise in the ensemble mean).
+    # Everything else here is the original, still-best validated baseline.
+    "n_ens_members": 12,
     "n_cascade_levels": 6,
     "ar_order": 2,
     "precip_thr_db": -10.0,

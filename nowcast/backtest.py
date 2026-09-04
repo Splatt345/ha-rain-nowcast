@@ -75,7 +75,7 @@ def score_config(config, R=None, n_obs=12, n_lead=12):
     metadata = {"unit": "mm/h", "transform": None, "zerovalue": 0.0,
                 "threshold": 0.04034535586833954, "accutime": 5.0}
 
-    train_db, _ = utils.transformation.dB_transform(
+    train_db, db_metadata = utils.transformation.dB_transform(
         train, metadata, threshold=0.1, zerovalue=-15.0
     )
     train_db[~np.isfinite(train_db)] = -15.0
@@ -97,8 +97,13 @@ def score_config(config, R=None, n_obs=12, n_lead=12):
         timestep=5,
         seed=42,
     )
+    # NOTE: must pass db_metadata (transform="dB") here, not the original
+    # metadata (transform=None) - pysteps' dB_transform(inverse=True) is a
+    # silent no-op unless metadata["transform"] == "dB". Passing the wrong
+    # one left forecasts in dB units being scored against mm/h truth in
+    # every result reported before this fix.
     forecast = utils.transformation.dB_transform(
-        forecast_db, metadata, threshold=cfg["precip_thr_db"], inverse=True
+        forecast_db, db_metadata, threshold=cfg["precip_thr_db"], inverse=True
     )[0]
     forecast_mean = np.nanmean(forecast, axis=0)
 
@@ -128,7 +133,7 @@ def run_forecast(train, metadata, config, n_lead):
 
     cfg = {**BASELINE_CONFIG, **config}
 
-    train_db, _ = utils.transformation.dB_transform(
+    train_db, db_metadata = utils.transformation.dB_transform(
         train, metadata, threshold=0.1, zerovalue=-15.0
     )
     train_db[~np.isfinite(train_db)] = -15.0
@@ -150,8 +155,9 @@ def run_forecast(train, metadata, config, n_lead):
         timestep=metadata.get("accutime", 5.0),
         seed=42,
     )
+    # see score_config's identical note: must use db_metadata, not metadata.
     forecast = utils.transformation.dB_transform(
-        forecast_db, metadata, threshold=cfg["precip_thr_db"], inverse=True
+        forecast_db, db_metadata, threshold=cfg["precip_thr_db"], inverse=True
     )[0]
     return np.nanmean(forecast, axis=0)
 

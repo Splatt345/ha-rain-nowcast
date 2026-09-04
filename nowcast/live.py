@@ -40,7 +40,14 @@ def _session():
     s = requests.Session()
     api_key = os.environ.get("ORD_API_KEY")
     if api_key:
+        # Docs don't state the exact header name/scheme, so send the key
+        # under every common gateway convention at once - unrecognized
+        # headers are normally just ignored, and this avoids burning more
+        # rate-limited requests guessing one at a time.
         s.headers["Authorization"] = f"Bearer {api_key}"
+        s.headers["apikey"] = api_key
+        s.headers["Ocp-Apim-Subscription-Key"] = api_key
+        s.headers["X-API-Key"] = api_key
     return s
 
 
@@ -53,15 +60,23 @@ def find_latest_composites(product="DBZH", n_frames=4, lookback_minutes=90, sess
     start = now - datetime.timedelta(minutes=lookback_minutes)
     dt_range = f"{start.strftime('%Y-%m-%dT%H:%MZ')}/{now.strftime('%Y-%m-%dT%H:%MZ')}"
 
+    params = {
+        "datetime": dt_range,
+        "standard_name": product,
+        "format": "ODIM",
+        "method": "comp",
+        "f": "CoverageJSON",
+    }
+    api_key = os.environ.get("ORD_API_KEY")
+    if api_key:
+        # belt-and-braces alongside the header attempts in _session(), same
+        # reasoning: the docs don't say which mechanism this gateway wants.
+        params["apikey"] = api_key
+        params["api_key"] = api_key
+
     resp = session.get(
         f"{ORD_BASE}/collections/observations/locations/{LOCATION_ID}",
-        params={
-            "datetime": dt_range,
-            "standard_name": product,
-            "format": "ODIM",
-            "method": "comp",
-            "f": "CoverageJSON",
-        },
+        params=params,
         timeout=30,
     )
     if resp.status_code == 429:
@@ -109,11 +124,14 @@ def _extract_download_urls(coverage_json):
 
 
 def download_composite(url, session=None):
-    session = session or _session()
+    # Deliberately NOT using the ORD-authenticated session here: the API
+    # response hands back a direct S3 (CloudFerro) URL, and S3 rejects our
+    # ORD API-key headers as a malformed AWS Authorization header (400) -
+    # this download needs a bare, header-less request.
     os.makedirs(CACHE_DIR, exist_ok=True)
     local_path = os.path.join(CACHE_DIR, os.path.basename(url.split("?")[0]))
     if not os.path.exists(local_path):
-        r = session.get(url, timeout=60)
+        r = requests.get(url, timeout=60)
         r.raise_for_status()
         with open(local_path, "wb") as f:
             f.write(r.content)
@@ -160,7 +178,9 @@ def get_live_frames(product="DBZH", n_frames=4, lookback_minutes=90):
     fields, metas, timestamps = [], [], []
     for url in urls:
         path = download_composite(url, session=session)
-        field, _, meta = import_odim_hdf5(path)
+        # pysteps defaults to qty="RATE"; our files only carry the quantity
+        # we requested from the API (DBZH reflectivity), so ask for that.
+        field, _, meta = import_odim_hdf5(path, qty=product)
         field, meta = crop_to_belgium(field, meta)
         if product == "DBZH":
             field, meta = to_rainrate(field, meta)
@@ -189,6 +209,10 @@ if __name__ == "__main__":
     forecast, metadata, timestamps = run_live_nowcast()
     print(f"Forecast shape: {forecast.shape} (lead steps, y, x)")
     for t in range(forecast.shape[0]):
-        print(f"  step {t + 1}: max {forecast[t].max():.1f} mm/h, "
-              f"mean {forecast[t].mean():.2f} mm/h")
+        # nan-aware: a thin edge band is legitimately NaN (STEPS advects
+        # data off the crop's border), plain .max()/.mean() would report
+        # NaN for the whole step from that alone.
+        print(f"  step {t + 1}: max {np.nanmax(forecast[t]):.1f} mm/h, "
+              f"mean {np.nanmean(forecast[t]):.2f} mm/h, "
+              f"finite {np.isfinite(forecast[t]).mean():.0%}")
     print(f"Done in {time.time() - t0:.1f}s")

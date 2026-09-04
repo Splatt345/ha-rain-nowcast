@@ -14,14 +14,15 @@ a free API key from https://placeholder.meteogate.eu raises the limit for
 frequent/scheduled polling - not set up here, add via ORD_API_KEY env var
 if you register one).
 
-Caveat: OPERA's native composite cadence is coarser than RMI's own 5-min
-product (docs didn't confirm the exact interval - the code below detects it
-from the actual returned timestamps rather than assuming 5 min). Fewer,
-sparser frames of context will somewhat understate the skill measured in
-the backtest, which used RMI's full 5-min cadence directly.
+Cadence: measured at 5 min against the live API (33 frames in a 180-min
+window), i.e. the same cadence as the RMI data the backtest was validated
+on - so the published skill numbers carry over. The interval is still
+detected from the returned filenames rather than assumed, since gaps and
+late-arriving frames are normal.
 """
 import datetime
 import os
+import re
 import time
 
 import numpy as np
@@ -29,7 +30,9 @@ import requests
 
 ORD_BASE = "https://api.meteogate.eu/eu-eumetnet-weather-radar"
 LOCATION_ID = "0-20010-0-OPERA"  # all-Europe composite
-CACHE_DIR = os.path.join(os.path.dirname(__file__), "..", "data", "live")
+CACHE_DIR = os.environ.get(
+    "RADAR_CACHE_DIR", os.path.join(os.path.dirname(__file__), "..", "data", "live")
+)
 
 # Belgium bounding box (lon_min, lat_min, lon_max, lat_max), with a small
 # margin so STEPS' optical flow has surrounding context to work with.
@@ -115,6 +118,30 @@ def _extract_download_urls(coverage_json):
     return [u for _, u in found]
 
 
+def parse_timestamp(url):
+    """Composite filenames look like OPERA@20260904T2145@0@DBZH.h5, and the
+    ODIM importer hands back timestamps=None, so the filename is the only
+    place the valid time is available.
+    """
+    m = re.search(r"(\d{8}T\d{4})", os.path.basename(url))
+    if not m:
+        return None
+    return datetime.datetime.strptime(m.group(1), "%Y%m%dT%H%M").replace(
+        tzinfo=datetime.timezone.utc
+    )
+
+
+def frame_interval_minutes(timestamps, default=5.0):
+    """Median gap between frames, in minutes - the real timestep to hand STEPS."""
+    times = [t for t in timestamps if t is not None]
+    if len(times) < 2:
+        return default
+    gaps = [
+        (b - a).total_seconds() / 60.0 for a, b in zip(times, times[1:]) if b > a
+    ]
+    return float(np.median(gaps)) if gaps else default
+
+
 def download_composite(url, session=None):
     # Deliberately NOT using the ORD-authenticated session here: the API
     # response hands back a direct S3 (CloudFerro) URL, and S3 rejects our
@@ -156,16 +183,20 @@ def crop_to_belgium(field, metadata):
     return cropped, meta
 
 
-def get_live_frames(product="DBZH", n_frames=4, lookback_minutes=90):
-    """Return (stack, metadata) - a (n_frames, y, x) mm/h array over Belgium
-    plus pysteps-style metadata, ready for backtest.run_forecast.
+def get_live_frames(product="DBZH", n_frames=4, lookback_minutes=90, urls=None):
+    """Return (stack, metadata, timestamps) - a (n_frames, y, x) mm/h array
+    over Belgium plus pysteps-style metadata, ready for backtest.run_forecast.
+
+    Pass `urls` to reuse a listing you already fetched (the add-on polls for
+    new frames more often than it rebuilds, and the API is rate-limited).
     """
     from pysteps.io import import_odim_hdf5
     from pysteps.utils.conversion import to_rainrate
 
     session = _session()
-    urls = find_latest_composites(product=product, n_frames=n_frames,
-                                   lookback_minutes=lookback_minutes, session=session)
+    if urls is None:
+        urls = find_latest_composites(product=product, n_frames=n_frames,
+                                       lookback_minutes=lookback_minutes, session=session)
 
     fields, metas, timestamps = [], [], []
     for url in urls:
@@ -178,10 +209,15 @@ def get_live_frames(product="DBZH", n_frames=4, lookback_minutes=90):
             field, meta = to_rainrate(field, meta)
         fields.append(field)
         metas.append(meta)
-        timestamps.append(meta.get("timestamps", [None])[0])
+        timestamps.append(parse_timestamp(url))
 
     stack = np.stack(fields, axis=0)
     metadata = metas[-1]  # shared geometry/units, most recent timestep's own fields
+    # The files carry accutime=15 (an ODIM accumulation-period field, meaningless
+    # for instantaneous DBZH) but arrive every 5 min. run_forecast reads accutime
+    # as the STEPS timestep, so leaving it would run the nowcast at 3x the real
+    # frame interval. Overwrite it with the interval actually observed.
+    metadata["accutime"] = frame_interval_minutes(timestamps)
     return stack, metadata, timestamps
 
 

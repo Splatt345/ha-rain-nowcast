@@ -1,0 +1,304 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Rain Nowcast</title>
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H"
+      crossorigin="anonymous">
+<style>
+  :root {
+    --bg: #f4f6f9;
+    --card: #ffffff;
+    --ink: #16202c;
+    --muted: #6b7787;
+    --line: #e4e9f0;
+    --accent: #2f7fe8;
+    --shadow: 0 1px 3px rgba(16,32,48,.08), 0 8px 24px rgba(16,32,48,.06);
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --bg: #11161c; --card: #1a212a; --ink: #e8edf4; --muted: #8d99a8;
+      --line: #2a333f; --accent: #64a6ff;
+      --shadow: 0 1px 3px rgba(0,0,0,.4), 0 8px 24px rgba(0,0,0,.3);
+    }
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--ink);
+    font: 15px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 940px; margin: 0 auto; padding: 18px 16px 28px; }
+
+  header { display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+  h1 { font-size: 1.45rem; font-weight: 650; margin: 0; letter-spacing: -.01em; }
+  #summary { font-size: 1.05rem; font-weight: 550; color: var(--accent); }
+  #meta { margin-left: auto; font-size: .82rem; color: var(--muted); }
+
+  .card {
+    background: var(--card); border: 1px solid var(--line); border-radius: 14px;
+    box-shadow: var(--shadow); overflow: hidden; margin-bottom: 16px;
+  }
+  .card h2 {
+    font-size: .78rem; font-weight: 650; text-transform: uppercase;
+    letter-spacing: .07em; color: var(--muted); margin: 0; padding: 13px 16px 0;
+  }
+
+  #map { height: 420px; background: var(--bg); }
+  @media (max-width: 560px) { #map { height: 320px; } }
+  .leaflet-container { font: inherit; background: var(--bg); }
+
+  .controls {
+    display: flex; align-items: center; gap: 12px;
+    padding: 11px 16px; border-top: 1px solid var(--line);
+  }
+  #play {
+    flex: none; width: 34px; height: 34px; border-radius: 50%; border: 0; cursor: pointer;
+    background: var(--accent); color: #fff; font-size: 13px; line-height: 1;
+    display: grid; place-items: center;
+  }
+  #play:hover { filter: brightness(1.08); }
+  #scrub { flex: 1; accent-color: var(--accent); min-width: 0; }
+  #stamp {
+    flex: none; font-variant-numeric: tabular-nums; font-weight: 600;
+    min-width: 116px; text-align: right; font-size: .9rem;
+  }
+  #stamp small { display: block; font-weight: 400; font-size: .74rem; color: var(--muted); }
+
+  .legend {
+    display: flex; align-items: center; gap: 9px;
+    padding: 0 16px 13px; font-size: .74rem; color: var(--muted);
+  }
+  .legend .bar {
+    flex: 1; height: 7px; border-radius: 4px;
+    background: linear-gradient(90deg,#96c8ff,#50a0fa,#236eeb,#19beb4,#3ccd5a,#f5d73c,#fa962d,#eb3c3c,#c832b4);
+  }
+  .legend .ticks { display: flex; justify-content: space-between; flex: 1; }
+
+  #chartbox { position: relative; padding: 8px 6px 12px; }
+  #chart { display: block; width: 100%; height: 190px; }
+  #tip {
+    position: absolute; pointer-events: none; opacity: 0; transition: opacity .12s;
+    background: var(--ink); color: var(--card); padding: 5px 9px; border-radius: 7px;
+    font-size: .78rem; font-weight: 600; white-space: nowrap; transform: translate(-50%,-140%);
+    font-variant-numeric: tabular-nums;
+  }
+  .note { font-size: .78rem; color: var(--muted); padding: 0 16px 14px; margin: 0; }
+  #banner {
+    display: none; padding: 11px 16px; border-radius: 10px; margin-bottom: 14px;
+    background: #fff4e0; color: #7a4b00; font-size: .88rem;
+  }
+  @media (prefers-color-scheme: dark) { #banner { background: #3a2b12; color: #ffd79a; } }
+</style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <h1>Rain</h1>
+    <div id="summary">Loading radar…</div>
+    <div id="meta"></div>
+  </header>
+
+  <div id="banner"></div>
+
+  <div class="card">
+    <div id="map"></div>
+    <div class="controls">
+      <button id="play" aria-label="Play or pause the radar loop">❚❚</button>
+      <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Radar time">
+      <div id="stamp">--:--<small>&nbsp;</small></div>
+    </div>
+    <div class="legend">
+      <span>mm/h</span>
+      <div style="flex:1">
+        <div class="bar"></div>
+        <div class="ticks"><span>0.1</span><span>1</span><span>5</span><span>20</span><span>80</span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card">
+    <h2>Minute by minute at your location</h2>
+    <div id="chartbox">
+      <canvas id="chart"></canvas>
+      <div id="tip"></div>
+    </div>
+    <p class="note" id="chartnote"></p>
+  </div>
+</div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+        integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH"
+        crossorigin="anonymous"></script>
+<script>
+const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+
+const map = L.map('map', { zoomControl: true, attributionControl: true });
+L.tileLayer(
+  `https://{s}.basemaps.cartocdn.com/${dark ? 'dark_all' : 'light_all'}/{z}/{x}/{y}{r}.png`,
+  { maxZoom: 12, minZoom: 5, attribution: '&copy; OpenStreetMap, &copy; CARTO | radar: EUMETNET OPERA' }
+).addTo(map);
+map.setView([50.85, 4.35], 7);
+
+let overlay = null, marker = null, state = null, frame = 0, playing = true, timer = null;
+
+const $ = id => document.getElementById(id);
+const hhmm = iso => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
+const relative = m => m === 0 ? 'now' : (m < 0 ? `${-m} min ago` : `in ${m} min`);
+
+// Same log scale the radar colours use, so the chart and the map agree.
+const LO = 0.05, HI = 50;
+const norm = v => v < LO ? 0 : Math.log10(v / LO) / Math.log10(HI / LO);
+
+async function poll() {
+  try {
+    const next = await (await fetch('./api/state', { cache: 'no-store' })).json();
+    if (next.status === 'ok') apply(next);
+    else if (next.status === 'error') banner(`Radar update failed: ${next.error || 'unknown error'}`);
+    else $('summary').textContent = 'Fetching radar…';
+  } catch (e) { banner('Cannot reach the add-on backend.'); }
+}
+
+function banner(msg) { const b = $('banner'); b.textContent = msg; b.style.display = 'block'; }
+
+function apply(next) {
+  const first = !state;
+  state = next;
+  $('summary').textContent = state.summary;
+  $('meta').textContent = `radar ${hhmm(state.updated)} · every ${state.interval_minutes} min`;
+  $('banner').style.display = state.in_coverage ? 'none' : 'block';
+  if (!state.in_coverage) banner('Your location sits outside the radar crop — the graph shows the nearest covered point.');
+
+  const bounds = L.latLngBounds(state.bounds);
+  if (!overlay) {
+    overlay = L.imageOverlay('', bounds, { opacity: .78, interactive: false }).addTo(map);
+    marker = L.circleMarker(state.location, {
+      radius: 6, color: '#fff', weight: 2.5, fillColor: '#111', fillOpacity: .9
+    }).addTo(map);
+    map.fitBounds(bounds.pad(-0.12));
+  }
+  marker.setLatLng(state.location);
+
+  // Preload every frame so scrubbing and the loop never show a gap.
+  state.frames.forEach(f => { new Image().src = `./frames/${f.name}.png`; });
+
+  $('scrub').max = state.frames.length - 1;
+  if (first) { frame = state.now_frame; play(true); }
+  showFrame(Math.min(frame, state.frames.length - 1));
+  drawChart();
+  $('chartnote').textContent =
+    `Radar updates every ${state.interval_minutes} min; the per-minute line between those ` +
+    `updates is interpolated. Values are averaged over ~3 km around your location.`;
+}
+
+function showFrame(i) {
+  frame = i;
+  const f = state.frames[i];
+  overlay.setUrl(`./frames/${f.name}.png`);
+  $('scrub').value = i;
+  $('stamp').innerHTML = `${hhmm(f.time)}<small>${relative(f.offset)}</small>`;
+  drawChart();
+}
+
+function play(on) {
+  playing = on;
+  $('play').textContent = on ? '❚❚' : '▶';
+  clearInterval(timer);
+  if (on) timer = setInterval(() => {
+    const last = state.frames.length - 1;
+    showFrame(frame >= last ? 0 : frame + 1);
+  }, 300);
+}
+
+$('play').onclick = () => play(!playing);
+$('scrub').oninput = e => { play(false); showFrame(+e.target.value); };
+
+function drawChart() {
+  if (!state) return;
+  const cv = $('chart'), dpr = devicePixelRatio || 1;
+  const w = cv.clientWidth, h = cv.clientHeight;
+  cv.width = w * dpr; cv.height = h * dpr;
+  const g = cv.getContext('2d');
+  g.setTransform(dpr, 0, 0, dpr, 0, 0);
+  g.clearRect(0, 0, w, h);
+
+  const { minutes, values } = state.series;
+  const padL = 34, padR = 10, padT = 12, padB = 22;
+  const x = m => padL + (m - minutes[0]) / (minutes.at(-1) - minutes[0]) * (w - padL - padR);
+  const y = v => h - padB - norm(v) * (h - padT - padB);
+
+  // Intensity gridlines, log-spaced like the colour scale.
+  g.font = '10px system-ui, sans-serif';
+  g.textAlign = 'right'; g.textBaseline = 'middle';
+  for (const [v, label] of [[0.1, 'light'], [1, 'mod'], [5, 'heavy'], [20, 'violent']]) {
+    g.strokeStyle = css('--line'); g.lineWidth = 1;
+    g.beginPath(); g.moveTo(padL, y(v) + .5); g.lineTo(w - padR, y(v) + .5); g.stroke();
+    g.fillStyle = css('--muted'); g.fillText(label, padL - 6, y(v));
+  }
+
+  // Shade the forecast half so past and future are never confused.
+  g.fillStyle = dark ? 'rgba(255,255,255,.035)' : 'rgba(16,32,48,.035)';
+  g.fillRect(x(0), padT, w - padR - x(0), h - padT - padB);
+
+  // Rain area, coloured by the same ramp as the map.
+  const grad = g.createLinearGradient(0, y(80), 0, y(0));
+  [[0,'#c832b4'],[.2,'#eb3c3c'],[.4,'#f5d73c'],[.6,'#3ccd5a'],[.8,'#2f8ceb'],[1,'#96c8ff']]
+    .forEach(([s, c]) => grad.addColorStop(s, c));
+  g.beginPath();
+  g.moveTo(x(minutes[0]), y(0));
+  minutes.forEach((m, i) => g.lineTo(x(m), y(values[i])));
+  g.lineTo(x(minutes.at(-1)), y(0));
+  g.closePath();
+  g.fillStyle = grad; g.globalAlpha = .8; g.fill(); g.globalAlpha = 1;
+  g.strokeStyle = css('--accent'); g.lineWidth = 1.6;
+  g.beginPath();
+  minutes.forEach((m, i) => i ? g.lineTo(x(m), y(values[i])) : g.moveTo(x(m), y(values[i])));
+  g.stroke();
+
+  // "Now" divider and the frame the map is currently showing.
+  g.strokeStyle = css('--ink'); g.lineWidth = 1.5; g.setLineDash([3, 3]);
+  g.beginPath(); g.moveTo(x(0), padT); g.lineTo(x(0), h - padB); g.stroke();
+  g.setLineDash([]);
+  const cur = state.frames[frame].offset;
+  g.strokeStyle = css('--accent'); g.lineWidth = 2;
+  g.beginPath(); g.moveTo(x(cur), padT); g.lineTo(x(cur), h - padB); g.stroke();
+
+  // Time axis.
+  g.fillStyle = css('--muted'); g.textBaseline = 'top';
+  for (const m of minutes.filter(m => m % 15 === 0)) {
+    g.textAlign = m === minutes[0] ? 'left' : (m === minutes.at(-1) ? 'right' : 'center');
+    g.fillText(m === 0 ? 'now' : `${m > 0 ? '+' : ''}${m}`, x(m), h - padB + 6);
+  }
+}
+
+$('chartbox').addEventListener('pointermove', e => {
+  if (!state) return;
+  const cv = $('chart'), r = cv.getBoundingClientRect();
+  const { minutes, values } = state.series;
+  const padL = 34, padR = 10;
+  const frac = (e.clientX - r.left - padL) / (r.width - padL - padR);
+  const i = Math.max(0, Math.min(values.length - 1, Math.round(frac * (values.length - 1))));
+  const tip = $('tip');
+  tip.style.opacity = 1;
+  tip.style.left = `${e.clientX - $('chartbox').getBoundingClientRect().left}px`;
+  tip.style.top = `${r.top - $('chartbox').getBoundingClientRect().top + r.height * .55}px`;
+  tip.textContent = `${values[i].toFixed(2)} mm/h · ${relative(minutes[i])}`;
+  // Snap the map to the frame nearest the cursor.
+  play(false);
+  let best = 0;
+  state.frames.forEach((f, k) => {
+    if (Math.abs(f.offset - minutes[i]) < Math.abs(state.frames[best].offset - minutes[i])) best = k;
+  });
+  if (best !== frame) showFrame(best);
+});
+$('chartbox').addEventListener('pointerleave', () => { $('tip').style.opacity = 0; });
+
+new ResizeObserver(drawChart).observe($('chartbox'));
+poll();
+setInterval(poll, 60000);
+</script>
+</body>
+</html>

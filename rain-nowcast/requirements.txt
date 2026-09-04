@@ -1,0 +1,9 @@
+pysteps>=1.11
+numpy>=1.24
+scipy>=1.10
+opencv-python-headless>=4.9
+h5py>=3.10
+pyproj>=3.6
+pillow>=10.0
+requests>=2.31
+dask>=2024.1

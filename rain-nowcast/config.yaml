@@ -1,0 +1,27 @@
+---
+name: Rain Nowcast
+version: "1.0.0"
+slug: rain_nowcast
+description: Live rain radar and a 60-minute minute-by-minute rain forecast
+url: https://github.com/efernet/ha-rain-nowcast
+ingress: true
+ingress_port: 8099
+panel_icon: mdi:weather-pouring
+panel_title: Rain
+arch:
+  - amd64
+  - aarch64
+options:
+  latitude: 50.85
+  longitude: 4.35
+  api_key: ""
+  history_minutes: 60
+  forecast_minutes: 60
+  ensemble_members: 12
+schema:
+  latitude: float
+  longitude: float
+  api_key: password
+  history_minutes: int(15,180)
+  forecast_minutes: int(15,120)
+  ensemble_members: int(1,24)

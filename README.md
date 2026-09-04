@@ -1,117 +1,75 @@
-# local_weather_model
+# ha-rain-nowcast
 
-Minute-scale precipitation nowcasting for Belgium.
+A Home Assistant add-on that shows live rain radar over Belgium and forecasts
+the next hour, minute by minute.
 
-## Why pysteps
+Forked from `local_weather_model`, which is the research side of this:
+figuring out *which* nowcasting method actually works and measuring how well.
+This repo is that method packaged as something you can click on.
 
-Global AI weather models (GraphCast, FourCastNet, Pangu-Weather, ClimaX,
-Google WeatherNext) are the wrong tool: 6h+ timesteps, 25-100km grids. Minute
-scale local rain needs radar-extrapolation nowcasting instead. A pretrained
-DGMR (DeepMind's nowcasting GAN, via openclimatefix's HuggingFace weights)
-was also tried and rejected: it loaded cleanly (all 854 weight tensors
-matched) but produced physically implausible output (rain rates up to
-3410 mm/h) - the published checkpoint is not a faithful reproduction of the
-paper model, and training one's own would be a much bigger project.
+- **Radar view** — the last hour of real radar, animated, on a real map, plus
+  the next hour extrapolated forward. Scrub or let it loop.
+- **Rain graph** — rain rate at your exact location, per minute, past hour
+  through next hour, with a plain-language summary ("Rain starting in 25 min,
+  up to 3.4 mm/h").
 
-`pysteps` (optical-flow radar extrapolation, no AI, no GPU needed) is the
-baseline and current best working option.
+Install and configuration: [`rain-nowcast/DOCS.md`](rain-nowcast/DOCS.md).
 
-## Result (tuned)
+## What's behind it
 
-Backtested against real RMI radar (Belgium, 2021-07-04, 5-min QPE composite,
-700x700 @ 1km): 60 min of history -> 60 min forecast, scored against the
-actual observed radar frames that followed.
+`pysteps` STEPS: optical-flow radar extrapolation with a stochastic ensemble.
+No AI, no GPU, no cloud service — it runs on the Home Assistant box in about
+12 seconds per cycle. Global AI weather models (GraphCast, Pangu-Weather,
+Google WeatherNext) are the wrong tool here: 6h+ timesteps on 25–100 km grids.
+DeepMind's DGMR is the right *class* of model, but the only public checkpoint
+produces physically impossible output (rain rates over 3000 mm/h) and lost
+badly to pysteps in a head-to-head backtest — 0.055 CSI against 0.52.
 
-A bounded, guarded search (`nowcast/optimize.py`, 10 candidates, coordinate-
-wise, auto-reverting anything that didn't clearly improve) tried ensemble
-size, cascade levels, AR order, optical-flow method, and noise method one
-at a time against the baseline. Only one change was accepted:
-**n_ens_members 6 -> 12** (more ensemble members lowers Monte Carlo noise in
-the ensemble-mean estimate - a generically safe change, not a fit to this
-one event). Everything else (cascade levels, AR order, lucaskanade optical
-flow, nonparametric noise) stayed at the original baseline; 9 other
-candidates were tried and rejected, including `vet`/`proesmans` optical flow
-(incompatible with this input-frame count, not a scoring rejection).
+Radar comes from EUMETNET's OPERA composite via the MeteoGate API, at 5-minute
+cadence — the same cadence the accuracy numbers were validated at.
 
-**Correctness fix (post-tuning):** an earlier version of this backtest had a
-units bug - pysteps' `dB_transform(..., inverse=True)` is a silent no-op
-unless the metadata dict passed in has `transform: "dB"` exactly, and the
-original code passed the pre-transform metadata (`transform: None`) instead
-of the one the forward transform actually returns. Forecasts were staying in
-dB units while being scored against real mm/h truth. CSI@1mm/h was barely
-affected by coincidence (0 dB is very close to the 1 mm/h threshold on the
-log scale), but every RMSE number reported before this fix was comparing
-mismatched units and should be disregarded - the true RMSE is roughly 15x
-better than what was originally reported. The table below is post-fix.
+## Accuracy
 
-| lead   | CSI@1mm/h | RMSE (mm/h) |
+| lead | CSI@1mm/h | RMSE (mm/h) |
 |--------|-----------|-------------|
-| 5 min  | 0.74      | 0.65        |
-| 30 min | 0.40      | 0.89        |
-| 60 min | 0.18      | 0.87        |
-| mean (search split)  | 0.40 | 0.89 |
-| mean (held-out split)| 0.35 | 0.74 |
+| 5 min | 0.74 | 0.65 |
+| 30 min | 0.40 | 0.89 |
+| 60 min | 0.18 | 0.87 |
+| mean (held-out) | 0.35 | 0.74 |
 
-The held-out split (a different issue time within the same event, never
-seen during search) scores lower on CSI than the search split - expected;
-treat 0.35 mean CSI as the more honest generalization estimate, not 0.40.
-CSI matches published pysteps/STEPS validation figures for European radar
-(Pulkkinen et al. 2019), so this is representative, not a fluke. Useful lead
-time (CSI above ~0.3-0.4) is roughly the first 30-35 minutes; degrades
-gracefully after that - a known limit of pure extrapolation (it can't
-predict storm genesis/dissipation, only advect existing cells).
+Useful skill runs to roughly 30–35 minutes, then degrades gracefully. That
+matches published STEPS validation for European radar (Pulkkinen et al. 2019),
+so it is representative rather than a lucky event. Extrapolation cannot
+predict storm genesis or decay — only advect what already exists.
 
-## Setup
+Two attempts to push past this were made and honestly failed to clear the bar:
+a guarded hyperparameter search (0.397 → 0.403 CSI, essentially noise) and
+NWP blending via `pysteps.blending.steps` (+0.002 CSI, 13% worse RMSE).
+
+## Layout
+
+```
+repository.yaml            Home Assistant add-on repository manifest
+rain-nowcast/
+  config.yaml  build.yaml  Dockerfile   add-on packaging
+  DOCS.md                               user-facing docs
+  web/index.html                        the UI (Leaflet map + canvas chart)
+  nowcast/
+    server.py       background refresh loop + HTTP server
+    render.py       radar field -> Web-Mercator PNG overlay, point series
+    live.py         fetch OPERA composites, crop to Belgium
+    backtest.py     the shared STEPS core, plus offline scoring
+    optimize.py     the guarded hyperparameter search
+```
+
+## Development
 
 ```bash
-python3.10 -m venv .venv
-.venv/bin/pip install pysteps h5py pyproj dask opencv-python-headless matplotlib netCDF4
-nowcast/fetch_data.sh   # pulls real RMI Belgium radar example data (~800MB)
-.venv/bin/python nowcast/backtest.py
+python3 -m venv .venv
+.venv/bin/pip install -r rain-nowcast/requirements.txt
+cd rain-nowcast
+ORD_API_KEY=... LATITUDE=50.85 LONGITUDE=4.35 ../.venv/bin/python -m nowcast.server
+# http://localhost:8099
 ```
 
-## Live nowcasting
-
-`nowcast/live.py` fetches real-time radar and runs the same validated STEPS
-pipeline (`run_forecast()`, shared with the backtest) - no known future to
-score against, just a live forecast.
-
-Belgium's own open data portal (opendata.meteo.be) requires account
-registration with no documented anonymous tier, so this uses EUMETNET's
-pan-European OPERA radar composite instead (same ODIM HDF5 format, includes
-Belgium). Anonymous access is rate-limited quickly; get a free API key from
-the [MeteoGate developer portal](https://meteogate.eu/) (login via GitHub/
-Google/Azure AD, no approval wait) and put it in a `.env` file (gitignored):
-
-```
-ORD_API_KEY=your-key-here
-```
-
-```bash
-set -a; source .env; set +a
-.venv/bin/python -m nowcast.live
-```
-
-Verified end-to-end against live data on 2026-09-04: forecasts came out
-physically sane (0-44 mm/h across the domain, ~97-99% finite - a thin edge
-band is legitimately NaN, STEPS advects data off a small crop's border).
-Two real bugs were found and fixed getting here: the S3 download URLs the
-API returns must NOT be sent the ORD auth headers (S3 rejects them as a
-malformed AWS Authorization header, 400); and pysteps' importer defaults to
-requesting quantity "RATE", but our files only carry "DBZH" (reflectivity,
-converted to rain rate via pysteps' Marshall-Palmer default).
-
-Caveat: OPERA's composite cadence (15 min here) is coarser than RMI's own
-5-min product used for the backtest above, so live forecasts have less
-temporal context than the validated numbers reflect.
-
-## Files
-
-- `nowcast/backtest.py` - `score_config(config)` runs one STEPS backtest and
-  returns CSI/RMSE per lead time; `run_forecast()` is the shared STEPS-running
-  core used by both backtesting and live nowcasting. Also a CLI for a
-  one-off backtest run.
-- `nowcast/live.py` - fetches live OPERA radar over Belgium and runs
-  `run_forecast()` on it. CLI entry point prints a per-step summary.
-- `nowcast/fetch_data.sh` - pulls the RMI example radar data (gitignored,
-  not committed - ~800MB).
+`python -m nowcast.render` runs the rendering self-check.

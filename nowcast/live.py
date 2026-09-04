@@ -40,14 +40,12 @@ def _session():
     s = requests.Session()
     api_key = os.environ.get("ORD_API_KEY")
     if api_key:
-        # Docs don't state the exact header name/scheme, so send the key
-        # under every common gateway convention at once - unrecognized
-        # headers are normally just ignored, and this avoids burning more
-        # rate-limited requests guessing one at a time.
-        s.headers["Authorization"] = f"Bearer {api_key}"
+        # Confirmed by testing each candidate individually - this is the
+        # only one of five that actually authenticates (Authorization:
+        # Bearer, Ocp-Apim-Subscription-Key and X-API-Key all still 429 as
+        # anonymous). Never put the key in the URL (params) - it'd end up
+        # in server/proxy logs.
         s.headers["apikey"] = api_key
-        s.headers["Ocp-Apim-Subscription-Key"] = api_key
-        s.headers["X-API-Key"] = api_key
     return s
 
 
@@ -67,12 +65,6 @@ def find_latest_composites(product="DBZH", n_frames=4, lookback_minutes=90, sess
         "method": "comp",
         "f": "CoverageJSON",
     }
-    api_key = os.environ.get("ORD_API_KEY")
-    if api_key:
-        # belt-and-braces alongside the header attempts in _session(), same
-        # reasoning: the docs don't say which mechanism this gateway wants.
-        params["apikey"] = api_key
-        params["api_key"] = api_key
 
     resp = session.get(
         f"{ORD_BASE}/collections/observations/locations/{LOCATION_ID}",

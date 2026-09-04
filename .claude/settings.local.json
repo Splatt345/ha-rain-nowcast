@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "WebSearch",
+      "WebFetch(domain:blog.google)",
+      "WebFetch(domain:github.com)"
+    ]
+  }
+}

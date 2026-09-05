@@ -190,8 +190,9 @@ function apply(next) {
   showFrame(Math.min(frame, state.frames.length - 1));
   drawChart();
   $('chartnote').textContent =
-    `Radar updates every ${state.interval_minutes} min; the per-minute line between those ` +
-    `updates is interpolated. Values are averaged over ~3 km around your location.`;
+    `Radar updates every ${state.interval_minutes} min. Between updates the line follows the ` +
+    `echo along its motion rather than fading between frames, so a shower arrives at the ` +
+    `minute it arrives. Values are averaged over ~3 km around your location.`;
 }
 
 function showFrame(i) {

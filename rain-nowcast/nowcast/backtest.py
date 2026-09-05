@@ -123,11 +123,14 @@ def score_config(config, R=None, n_obs=12, n_lead=12):
     }
 
 
-def run_forecast(train, metadata, config, n_lead):
+def run_forecast(train, metadata, config, n_lead, return_motion=False):
     """Run STEPS on a raw mm/h `train` stack (most-recent-last) and return the
     ensemble-mean forecast in mm/h, shape (n_lead, y, x). No verification -
     used for live nowcasting where there's no future truth yet to score
     against (see score_config, which wraps this for backtesting).
+
+    With return_motion=True also returns the estimated motion field, which
+    sub-frame interpolation needs; the default keeps the original return type.
     """
     from pysteps import motion, nowcasts, utils
 
@@ -159,7 +162,8 @@ def run_forecast(train, metadata, config, n_lead):
     forecast = utils.transformation.dB_transform(
         forecast_db, db_metadata, threshold=cfg["precip_thr_db"], inverse=True
     )[0]
-    return np.nanmean(forecast, axis=0)
+    mean = np.nanmean(forecast, axis=0)
+    return (mean, motion_field) if return_motion else mean
 
 
 BASELINE_CONFIG = {

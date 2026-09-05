@@ -15,7 +15,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
 
-from nowcast import live, render
+from nowcast import interpolate, live, render
 from nowcast.backtest import BASELINE_CONFIG, run_forecast
 from nowcast.publish import Publisher
 
@@ -105,7 +105,8 @@ class Nowcaster:
         interval = metadata["accutime"]
         n_lead = max(1, round(opts["forecast_minutes"] / interval))
         config = {**BASELINE_CONFIG, "n_ens_members": opts["ensemble_members"]}
-        forecast = run_forecast(stack, metadata, config, n_lead)
+        forecast, motion = run_forecast(stack, metadata, config, n_lead,
+                                        return_motion=True)
 
         last_time = timestamps[-1] or datetime.datetime.now(datetime.timezone.utc)
         rows, cols, _ = render.mercator_sampler(metadata, live.BELGIUM_BBOX)
@@ -128,20 +129,29 @@ class Nowcaster:
         for k, field in enumerate(forecast, start=1):
             add(f"f{k}", field, interval * k, "forecast")
 
-        # Point series, resampled to the minute. The radar itself only updates
-        # every `interval` minutes, so the between-frame values are linear
-        # interpolation, not extra information.
+        # Point series at one-minute resolution. Radar still only arrives every
+        # `interval` minutes, but the values in between are obtained by tracing
+        # along the motion field rather than fading linearly between frames -
+        # so a shower arrives at the right minute instead of ramping up over
+        # five, and a peak that passes between two frames isn't clipped.
         row, col = render.point_rowcol(metadata, opts["latitude"], opts["longitude"])
         ny, nx = stack.shape[1:]
         in_coverage = 0 <= row < ny and 0 <= col < nx
         row, col = int(np.clip(row, 0, ny - 1)), int(np.clip(col, 0, nx - 1))
-        values = np.concatenate([
-            render.point_series(stack, row, col),
-            render.point_series(forecast, row, col),
-        ])
         offsets = [f["offset"] for f in frames]
         minutes = np.arange(offsets[0], offsets[-1] + 1)
-        series = np.interp(minutes, offsets, values)
+
+        sub_steps = int(round(interval))
+        sequence = np.concatenate([stack, forecast])
+        series = None
+        if sub_steps >= 1 and abs(interval - sub_steps) < 1e-6:
+            candidate = interpolate.point_series(sequence, motion, row, col,
+                                                 sub_steps=sub_steps)
+            if len(candidate) == len(minutes):
+                series = candidate
+        if series is None:  # odd cadence: fall back to the plain time blend
+            values = render.point_series(sequence, row, col)
+            series = np.interp(minutes, offsets, values)
 
         state = {
             "status": "ok",

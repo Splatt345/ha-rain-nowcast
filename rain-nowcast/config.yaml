@@ -11,6 +11,11 @@ panel_title: Rain
 arch:
   - amd64
   - aarch64
+# Sensors go out over MQTT when a broker is configured, and fall back to the
+# core REST API when there isn't one.
+homeassistant_api: true
+services:
+  - mqtt:want
 options:
   latitude: 50.85
   longitude: 4.35
@@ -18,6 +23,7 @@ options:
   history_minutes: 60
   forecast_minutes: 60
   ensemble_members: 12
+  publish_sensors: true
 schema:
   latitude: float
   longitude: float
@@ -25,3 +31,4 @@ schema:
   history_minutes: int(15,180)
   forecast_minutes: int(15,120)
   ensemble_members: int(1,24)
+  publish_sensors: bool

@@ -12,6 +12,8 @@ This repo is that method packaged as something you can click on.
 - **Rain graph** — rain rate at your exact location, per minute, past hour
   through next hour, with a plain-language summary ("Rain starting in 25 min,
   up to 3.4 mm/h").
+- **Sensors** — seven entities (is it raining, minutes until rain, peak rate,
+  expected total…) so automations can act before the rain lands.
 
 Install and configuration: [`rain-nowcast/DOCS.md`](rain-nowcast/DOCS.md).
 
@@ -56,6 +58,7 @@ rain-nowcast/
   web/index.html                        the UI (Leaflet map + canvas chart)
   nowcast/
     server.py       background refresh loop + HTTP server
+    publish.py      Home Assistant entities, over MQTT or the core REST API
     render.py       radar field -> Web-Mercator PNG overlay, point series
     live.py         fetch OPERA composites, crop to Belgium
     backtest.py     the shared STEPS core, plus offline scoring

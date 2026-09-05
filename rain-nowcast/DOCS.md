@@ -29,6 +29,45 @@ with GitHub/Google/Azure AD, no approval wait) and paste it into `api_key`.
 | `history_minutes` | 60 | How much radar history to show and feed the nowcast. |
 | `forecast_minutes` | 60 | How far ahead to forecast. Skill is largely gone past ~35 min. |
 | `ensemble_members` | 12 | STEPS ensemble size. Lower it to 4–6 on a Raspberry Pi; a full cycle takes ~12 s on a desktop CPU. |
+| `publish_sensors` | true | Publish the forecast as Home Assistant entities. |
+
+## Sensors
+
+Seven entities update on every radar frame, so automations can act on rain
+before it arrives rather than after.
+
+| Entity | Value |
+|---|---|
+| `binary_sensor.rain_nowcast_raining` | Is it raining at your location right now |
+| `sensor.rain_nowcast_rain_rate` | Current rain rate, mm/h |
+| `sensor.rain_nowcast_minutes_until_rain` | Minutes until rain starts — `0` if it already is, `unknown` if none is forecast within the hour |
+| `sensor.rain_nowcast_minutes_until_dry` | Minutes until it stops |
+| `sensor.rain_nowcast_peak_rate` | Heaviest rain expected in the forecast window, mm/h |
+| `sensor.rain_nowcast_expected_rain` | Total rain expected over the window, mm |
+| `sensor.rain_nowcast_summary` | The one-line summary, plus the whole per-minute curve as attributes |
+
+They are published over MQTT discovery when a broker is configured — the
+add-on asks the Supervisor for it, so there is nothing to fill in — which
+gives proper registry entities you can rename and group. Without a broker it
+falls back to the core REST API: the same entities appear, but they are not
+registry entries and are lost on a Home Assistant restart until the next radar
+frame republishes them (a few minutes at most).
+
+```yaml
+automation:
+  - alias: Close the awning before the rain
+    trigger:
+      - platform: numeric_state
+        entity_id: sensor.rain_nowcast_minutes_until_rain
+        below: 15
+    condition:
+      - condition: numeric_state
+        entity_id: sensor.rain_nowcast_peak_rate
+        above: 1
+    action:
+      - service: cover.close_cover
+        target: { entity_id: cover.awning }
+```
 
 ## How good is it?
 

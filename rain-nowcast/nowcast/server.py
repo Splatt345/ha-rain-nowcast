@@ -17,6 +17,7 @@ import numpy as np
 
 from nowcast import live, render
 from nowcast.backtest import BASELINE_CONFIG, run_forecast
+from nowcast.publish import Publisher
 
 WEB_DIR = os.path.join(os.path.dirname(__file__), "..", "web")
 PORT = int(os.environ.get("PORT", "8099"))
@@ -47,12 +48,18 @@ def load_options():
     if api_key:
         os.environ["ORD_API_KEY"] = api_key  # live._session() picks it up here
 
+    # options.json gives a real bool; an env var gives a string, and bool("false")
+    # is True, so parse rather than cast.
+    def yes_no(v):
+        return str(v).strip().lower() not in ("0", "false", "no", "off")
+
     return {
         "latitude": opt("latitude", 50.85, float),
         "longitude": opt("longitude", 4.35, float),
         "history_minutes": opt("history_minutes", 60, int),
         "forecast_minutes": opt("forecast_minutes", 60, int),
         "ensemble_members": opt("ensemble_members", 12, int),
+        "publish_sensors": opt("publish_sensors", True, yes_no),
     }
 
 
@@ -73,6 +80,7 @@ class Nowcaster:
         self.images = {}
         self.state = {"status": "starting"}
         self._last_url = None
+        self.publisher = Publisher(opts["publish_sensors"])
 
     def snapshot(self):
         with self.lock:
@@ -157,6 +165,13 @@ class Nowcaster:
         with self.lock:
             self.images, self.state = images, state
         self._last_url = urls[-1]
+
+        # A broker hiccup must not cost us the forecast we just computed.
+        try:
+            self.publisher.publish(state)
+        except Exception:
+            traceback.print_exc()
+
         prune_cache()
         return True
 

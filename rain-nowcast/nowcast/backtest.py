@@ -24,11 +24,10 @@ def load_stack():
         raise FileNotFoundError(
             f"No RMI radar frames in {DATA_DIR}. Run ./fetch_data.sh first."
         )
-    fields, metadata = [], None
+    fields = []
     for f in files:
-        field, _, meta = io.import_odim_hdf5(f)
+        field, _, _ = io.import_odim_hdf5(f)
         fields.append(field)
-        metadata = meta
     stack = np.stack(fields, axis=0)
     os.makedirs(os.path.dirname(CACHE_NPY), exist_ok=True)
     np.save(CACHE_NPY, stack)
@@ -123,14 +122,18 @@ def score_config(config, R=None, n_obs=12, n_lead=12):
     }
 
 
-def run_forecast(train, metadata, config, n_lead, return_motion=False):
+def run_forecast(train, metadata, config, n_lead, return_extras=False):
     """Run STEPS on a raw mm/h `train` stack (most-recent-last) and return the
     ensemble-mean forecast in mm/h, shape (n_lead, y, x). No verification -
     used for live nowcasting where there's no future truth yet to score
     against (see score_config, which wraps this for backtesting).
 
-    With return_motion=True also returns the estimated motion field, which
-    sub-frame interpolation needs; the default keeps the original return type.
+    With return_extras=True also returns (motion_field, members): the motion
+    estimate sub-frame interpolation needs, and the raw ensemble of shape
+    (n_ens, n_lead, y, x). The members are what the ensemble mean throws away,
+    and they are the only honest source for "70% chance of rain" - the mean of
+    12 members is not a rain rate anyone will observe. Default return type is
+    unchanged.
     """
     from pysteps import motion, nowcasts, utils
 
@@ -163,7 +166,7 @@ def run_forecast(train, metadata, config, n_lead, return_motion=False):
         forecast_db, db_metadata, threshold=cfg["precip_thr_db"], inverse=True
     )[0]
     mean = np.nanmean(forecast, axis=0)
-    return (mean, motion_field) if return_motion else mean
+    return (mean, motion_field, forecast) if return_extras else mean
 
 
 BASELINE_CONFIG = {

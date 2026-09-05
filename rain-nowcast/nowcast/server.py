@@ -105,8 +105,8 @@ class Nowcaster:
         interval = metadata["accutime"]
         n_lead = max(1, round(opts["forecast_minutes"] / interval))
         config = {**BASELINE_CONFIG, "n_ens_members": opts["ensemble_members"]}
-        forecast, motion = run_forecast(stack, metadata, config, n_lead,
-                                        return_motion=True)
+        forecast, motion, members = run_forecast(stack, metadata, config, n_lead,
+                                                 return_extras=True)
 
         last_time = timestamps[-1] or datetime.datetime.now(datetime.timezone.utc)
         rows, cols, _ = render.mercator_sampler(metadata, live.BELGIUM_BBOX)
@@ -142,16 +142,29 @@ class Nowcaster:
         minutes = np.arange(offsets[0], offsets[-1] + 1)
 
         sub_steps = int(round(interval))
-        sequence = np.concatenate([stack, forecast])
-        series = None
-        if sub_steps >= 1 and abs(interval - sub_steps) < 1e-6:
-            candidate = interpolate.point_series(sequence, motion, row, col,
-                                                 sub_steps=sub_steps)
-            if len(candidate) == len(minutes):
-                series = candidate
-        if series is None:  # odd cadence: fall back to the plain time blend
-            values = render.point_series(sequence, row, col)
-            series = np.interp(minutes, offsets, values)
+
+        def point_curve(sequence):
+            if sub_steps >= 1 and abs(interval - sub_steps) < 1e-6:
+                candidate = interpolate.point_series(sequence, motion, row, col,
+                                                     sub_steps=sub_steps)
+                if len(candidate) == len(minutes):
+                    return candidate
+            # odd cadence: fall back to the plain time blend
+            return np.interp(minutes, offsets,
+                             render.point_series(sequence, row, col))
+
+        series = point_curve(np.concatenate([stack, forecast]))
+
+        # The same curve for each ensemble member. STEPS runs 12 of them and we
+        # were averaging them away: the mean is a smoothed field that measurably
+        # under-calls peaks, so thresholding it answers a question nobody asked.
+        # How many members are wet at a given minute *is* a probability, needs
+        # nothing fitted, and is what the ensemble was run for in the first
+        # place. Cheap - each curve samples a 3x3 box, not the whole grid.
+        member_curves = np.array([point_curve(np.concatenate([stack, m]))
+                                  for m in members])
+        probability = (member_curves >= RAIN_THRESHOLD).mean(axis=0)
+        del members, member_curves
 
         state = {
             "status": "ok",
@@ -163,13 +176,16 @@ class Nowcaster:
             "location": [opts["latitude"], opts["longitude"]],
             "in_coverage": in_coverage,
             "interval_minutes": interval,
+            "n_members": config["n_ens_members"],
             "frames": frames,
             "now_frame": len(stack) - 1,
             "series": {
                 "minutes": minutes.tolist(),
                 "values": [round(float(v), 3) for v in series],
+                "probability": [round(float(p), 2) for p in probability],
             },
-            "summary": self._summary(minutes, series),
+            "rain_chance": round(float(probability[int(np.searchsorted(minutes, 0)):].max()), 2),
+            "summary": self._summary(minutes, series, probability),
         }
 
         with self.lock:
@@ -186,17 +202,23 @@ class Nowcaster:
         return True
 
     @staticmethod
-    def _summary(minutes, series):
+    def _summary(minutes, series, probability):
         now = int(np.searchsorted(minutes, 0))
         future, ahead = series[now:], minutes[now:]
+        chance = int(round(100 * probability[now:].max()))
         if future[0] >= RAIN_THRESHOLD:
             dry = np.flatnonzero(future < RAIN_THRESHOLD)
             stops = f", stopping in {int(ahead[dry[0]])} min" if dry.size else ""
             return f"Raining now, {future[0]:.1f} mm/h{stops}"
         wet = np.flatnonzero(future >= RAIN_THRESHOLD)
         if wet.size:
-            peak = future[wet[0]:].max()
-            return f"Rain starting in {int(ahead[wet[0]])} min, up to {peak:.1f} mm/h"
+            return (f"Rain starting in {int(ahead[wet[0]])} min ({chance}% chance), "
+                    f"up to {future[wet[0]:].max():.1f} mm/h")
+        # The mean can read dry while a third of the members rain on you - that
+        # is exactly the case the old wording got confidently wrong.
+        if chance >= 20:
+            return (f"Probably dry, but a {chance}% chance of rain "
+                    f"in the next {int(ahead[-1])} min")
         return f"Dry for the next {int(ahead[-1])} minutes"
 
     def loop(self):
@@ -255,5 +277,41 @@ def main():
     ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
 
 
+def _demo():
+    """Self-check for the parts that need no radar, broker or network."""
+    minutes = np.arange(-55, 61)
+    n = len(minutes)
+    flat = lambda v: np.full(n, v, dtype=float)
+
+    s = Nowcaster._summary(minutes, flat(0.0), flat(0.0))
+    assert s.startswith("Dry for the next"), s
+    # the case the ensemble exists for: the mean reads dry, a third of the
+    # members rain on you anyway, and the old wording called that "Dry".
+    s = Nowcaster._summary(minutes, flat(0.0), flat(1 / 3))
+    assert s.startswith("Probably dry") and "33% chance" in s, s
+    s = Nowcaster._summary(minutes, flat(2.0), flat(1.0))
+    assert s.startswith("Raining now, 2.0 mm/h") and "stopping" not in s, s
+    s = Nowcaster._summary(minutes, np.where(minutes >= 20, 4.0, 0.0),
+                           np.where(minutes >= 20, 0.75, 0.0))
+    assert "starting in 20 min (75% chance)" in s and "up to 4.0" in s, s
+
+    # The contract refresh() leans on: the extras really are the members the
+    # mean was taken over, so the probability band and the rate line above it
+    # describe the same forecast.
+    rng = np.random.default_rng(0)
+    train = np.abs(rng.gamma(1.0, 2.0, size=(4, 64, 64)))
+    meta = {"unit": "mm/h", "transform": None, "zerovalue": 0.0,
+            "threshold": 0.01, "accutime": 5.0,
+            "xpixelsize": 1000.0, "ypixelsize": 1000.0}
+    mean, motion, members = run_forecast(
+        train, meta, {**BASELINE_CONFIG, "n_ens_members": 4}, 3, return_extras=True)
+    assert members.shape == (4, 3, 64, 64), members.shape
+    assert motion.shape == (2, 64, 64), motion.shape
+    assert np.allclose(np.nanmean(members, axis=0), mean, equal_nan=True)
+    print("server self-check ok")
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+
+    _demo() if "--selfcheck" in sys.argv else main()

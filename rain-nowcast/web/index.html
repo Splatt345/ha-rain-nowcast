@@ -192,7 +192,9 @@ function apply(next) {
   $('chartnote').textContent =
     `Radar updates every ${state.interval_minutes} min. Between updates the line follows the ` +
     `echo along its motion rather than fading between frames, so a shower arrives at the ` +
-    `minute it arrives. Values are averaged over ~3 km around your location.`;
+    `minute it arrives. Values are averaged over ~3 km around your location. The shaded ` +
+    `band at the bottom is how many of the ${state.n_members ?? 12} forecast members are ` +
+    `wet at that minute — full height means they all agree it rains.`;
 }
 
 function showFrame(i) {
@@ -259,6 +261,20 @@ function drawChart() {
   minutes.forEach((m, i) => i ? g.lineTo(x(m), y(values[i])) : g.moveTo(x(m), y(values[i])));
   g.stroke();
 
+  // Ensemble agreement as a band along the bottom: how many of the 12 STEPS
+  // members are wet at this minute. The line above is their mean, which is
+  // smoother than any rain that actually falls - this is the honest spread.
+  const prob = state.series.probability;
+  if (prob) {
+    const bandH = (h - padT - padB) * .18, base = h - padB;
+    g.fillStyle = css('--accent'); g.globalAlpha = .3;
+    g.beginPath();
+    g.moveTo(x(minutes[0]), base);
+    minutes.forEach((m, i) => g.lineTo(x(m), base - prob[i] * bandH));
+    g.lineTo(x(minutes.at(-1)), base);
+    g.closePath(); g.fill(); g.globalAlpha = 1;
+  }
+
   // "Now" divider and the frame the map is currently showing.
   g.strokeStyle = css('--ink'); g.lineWidth = 1.5; g.setLineDash([3, 3]);
   g.beginPath(); g.moveTo(x(0), padT); g.lineTo(x(0), h - padB); g.stroke();
@@ -286,7 +302,9 @@ $('chartbox').addEventListener('pointermove', e => {
   tip.style.opacity = 1;
   tip.style.left = `${e.clientX - $('chartbox').getBoundingClientRect().left}px`;
   tip.style.top = `${r.top - $('chartbox').getBoundingClientRect().top + r.height * .55}px`;
-  tip.textContent = `${values[i].toFixed(2)} mm/h · ${relative(minutes[i])}`;
+  const p = state.series.probability;
+  tip.textContent = `${values[i].toFixed(2)} mm/h · ${relative(minutes[i])}`
+    + (p ? ` · ${Math.round(p[i] * 100)}% of members wet` : '');
   // Snap the map to the frame nearest the cursor.
   play(false);
   let best = 0;

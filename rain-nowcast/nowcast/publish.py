@@ -35,6 +35,7 @@ ENTITIES = {
     "minutes_until_rain": ("Rain starts in", "min", None, None, "mdi:weather-rainy"),
     "minutes_until_dry": ("Rain stops in", "min", None, None, "mdi:weather-partly-cloudy"),
     "peak_rate": ("Peak rain rate", "mm/h", "precipitation_intensity", "measurement", None),
+    "rain_chance": ("Rain chance", "%", None, "measurement", "mdi:weather-pouring"),
     "expected_rain": ("Rain expected", "mm", "precipitation", "measurement", None),
     "summary": ("Rain summary", None, None, None, "mdi:text-short"),
 }
@@ -62,6 +63,12 @@ def metrics(state):
         "minutes_until_dry": (int(ahead[dry[0]]) if raining and dry.size else
                               (0 if not raining else None)),
         "peak_rate": round(float(future.max()), 2),
+        # Share of the STEPS ensemble that rains on this point at its wettest
+        # minute. An automation that wants "don't water the garden if it might
+        # rain" needs this, not a smoothed mean that reads 0.0 while 4 of 12
+        # members are wet.
+        "rain_chance": (None if state.get("rain_chance") is None
+                        else int(round(100 * state["rain_chance"]))),
         # each per-minute value is a rate in mm/h, so a minute contributes v/60 mm
         "expected_rain": round(float(future.sum() / 60.0), 2),
         "summary": state["summary"],
@@ -201,6 +208,7 @@ class Publisher:
         attrs = {
             "forecast_minutes": state["series"]["minutes"],
             "forecast_values": state["series"]["values"],
+            "forecast_probability": state["series"].get("probability"),
             "latitude": state["location"][0],
             "longitude": state["location"][1],
         }
@@ -212,9 +220,10 @@ class Publisher:
 
 def _demo():
     """Self-check for the derived numbers - no broker, no Home Assistant."""
-    def state(values, minutes=None):
+    def state(values, minutes=None, chance=None):
         minutes = minutes or list(range(-55, 61))
         return {"series": {"minutes": minutes, "values": values},
+                "rain_chance": chance,
                 "summary": "x", "updated": "t", "location": [50.0, 4.0]}
 
     n_past, n_fut = 55, 61
@@ -237,6 +246,13 @@ def _demo():
     assert m["raining"] is True and m["minutes_until_rain"] == 0
     assert m["minutes_until_dry"] == 10, m
     assert m["rain_rate"] == 2.0
+
+    # the case the ensemble exists for: mean says dry, a third of members disagree
+    m = metrics(state([0.0] * (n_past + n_fut), chance=0.33))
+    assert m["raining"] is False and m["peak_rate"] == 0.0
+    assert m["rain_chance"] == 33, m
+    # a state from before probabilities existed must still publish
+    assert metrics(state([0.0] * (n_past + n_fut)))["rain_chance"] is None
     print("publish self-check ok")
 
 

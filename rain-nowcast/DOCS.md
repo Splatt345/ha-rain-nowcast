@@ -33,7 +33,7 @@ with GitHub/Google/Azure AD, no approval wait) and paste it into `api_key`.
 
 ## Sensors
 
-Seven entities update on every radar frame, so automations can act on rain
+Eight entities update on every radar frame, so automations can act on rain
 before it arrives rather than after.
 
 | Entity | Value |
@@ -43,8 +43,23 @@ before it arrives rather than after.
 | `sensor.rain_nowcast_minutes_until_rain` | Minutes until rain starts — `0` if it already is, `unknown` if none is forecast within the hour |
 | `sensor.rain_nowcast_minutes_until_dry` | Minutes until it stops |
 | `sensor.rain_nowcast_peak_rate` | Heaviest rain expected in the forecast window, mm/h |
+| `sensor.rain_nowcast_rain_chance` | Chance of rain at its likeliest minute in the window, % |
 | `sensor.rain_nowcast_expected_rain` | Total rain expected over the window, mm |
 | `sensor.rain_nowcast_summary` | The one-line summary, plus the whole per-minute curve as attributes |
+
+### Why there is a chance and not just a rate
+
+The forecast is an ensemble: twelve runs of the same model, each with a
+different draw of plausible small-scale detail. Every other sensor here reports
+their *average*, and an average of twelve rain fields is smoother than any rain
+that actually falls. It flattens showers, and near the edge of a band it can
+read 0.0 mm/h while a third of the runs put rain on your roof.
+
+`rain_chance` is the share of runs that are wet at the minute they most agree
+on. Use it for "should I do this outside"; `rain_rate` and `peak_rate` are still
+the right ones for "how hard". The shaded band along the bottom of the chart is
+the same number, minute by minute — full height means all twelve runs agree it
+rains then.
 
 They are published over MQTT discovery when a broker is configured — the
 add-on asks the Supervisor for it, so there is nothing to fill in — which

@@ -12,6 +12,25 @@ RUN apt-get update \
 COPY requirements.txt /tmp/
 RUN pip install --no-cache-dir --prefix=/install -r /tmp/requirements.txt
 
+# NOTHING IS PRUNED HERE, AND THAT IS A MEASURED DECISION. Both of the usual
+# image-slimming steps were tried on this dependency set and both shipped a
+# broken image:
+#
+#   strip --strip-unneeded on the .so files  -> numpy cannot load its compiled
+#     extensions and fails with the misleading "you should not try to import
+#     numpy from its source directory". The scientific wheels need symbols
+#     strip considers unneeded.
+#
+#   deleting bundled tests/ directories (62 MB) -> ModuleNotFoundError:
+#     numpy._core.tests. It is imported for real at runtime, not just by tests.
+#
+# __pycache__ (82 MB) is kept on purpose as well: deleting it only moves the
+# cost to container start, where Python writes it straight back into the
+# writable layer, so the host saves nothing and every restart pays for it.
+#
+# The real saving on this image was the dependency choice, not pruning:
+# onnxruntime instead of PyTorch took it from 2.06 GB to 1.08 GB.
+
 # hadolint ignore=DL3006
 FROM ${BUILD_FROM}
 
@@ -29,7 +48,14 @@ COPY web /app/web
 COPY models /app/models
 
 WORKDIR /app
+# MALLOC_ARENA_MAX caps glibc's per-thread allocation arenas. It creates up to
+# 8x ncores of them for a threaded program and never returns them to the OS,
+# which for this workload is pure waste: measured 784 MiB resident by default
+# against 571 MiB at 2, for one environment variable. The usual cost is
+# allocator contention under heavy concurrency, and this forecasts once every
+# five minutes.
 ENV PYTHONUNBUFFERED=1 \
+    MALLOC_ARENA_MAX=2 \
     RADAR_CACHE_DIR=/data/cache
 
 EXPOSE 8099

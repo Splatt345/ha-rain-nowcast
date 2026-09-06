@@ -25,7 +25,7 @@ PORT = int(os.environ.get("PORT", "8099"))
 POLL_SECONDS = 120  # how often we check for a new frame (cheap: one list call)
 RAIN_THRESHOLD = 0.1  # mm/h; below this, call it dry
 CACHE_KEEP_MINUTES = 180
-MODEL_WEIGHTS = os.path.join(os.path.dirname(__file__), "..", "models", "smaat.pt")
+MODEL_WEIGHTS = os.path.join(os.path.dirname(__file__), "..", "models", "smaat.onnx")
 
 
 def load_options():
@@ -159,9 +159,16 @@ class Nowcaster:
         # Everything the point curves need, kept so the marker can be moved
         # without re-running STEPS (see _point_state and /api/point). The
         # ensemble is the bulky part - 12 members x 12 leads on the Belgium crop
-        # is ~60 MB of float32 - and it is the whole reason a moved marker still
+        # is ~71 MB of float32 - and it is the whole reason a moved marker still
         # gets a probability and a fan rather than just a mean.
+        # float32, not the float64 pysteps hands back. The retained ensemble is
+        # the biggest object the add-on holds - 12 members x 12 leads on the
+        # 338x364 Belgium crop is 142 MB at float64 - and it exists only to be
+        # sampled in 3x3 boxes along the motion field, where float32's ~7
+        # significant digits are six more than a rain rate has.
         offsets = [f["offset"] for f in frames]
+        members = np.asarray(members, dtype=np.float32)
+        forecast = np.asarray(forecast, dtype=np.float32)
         ctx = {
             "stack": stack, "forecast": forecast, "members": members,
             "motion": motion, "metadata": metadata, "interval": interval,
@@ -224,10 +231,10 @@ class Nowcaster:
             return members, forecast
         try:
             from nowcast import combine
-            from nowcast.smaat import forecast as ml_forecast
+            from nowcast.mlmodel import forecast as ml_forecast
 
             ml = ml_forecast(np.asarray(stack, dtype=np.float32), n_lead,
-                             weights=MODEL_WEIGHTS, device="cpu")
+                             weights=MODEL_WEIGHTS)
             w = combine.WEIGHTS[:n_lead] if n_lead <= len(combine.WEIGHTS) else \
                 np.pad(combine.WEIGHTS, (0, n_lead - len(combine.WEIGHTS)),
                        mode="edge")

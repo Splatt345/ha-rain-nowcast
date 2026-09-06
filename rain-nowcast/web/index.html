@@ -71,11 +71,26 @@
     display: flex; align-items: center; gap: 9px;
     padding: 0 16px 13px; font-size: .74rem; color: var(--muted);
   }
-  .legend .bar {
-    flex: 1; height: 7px; border-radius: 4px;
-    background: linear-gradient(90deg,#96c8ff,#50a0fa,#236eeb,#19beb4,#3ccd5a,#f5d73c,#fa962d,#eb3c3c,#c832b4);
-  }
+  .legend canvas { display: block; width: 100%; height: 7px; border-radius: 4px; }
   .legend .ticks { display: flex; justify-content: space-between; flex: 1; }
+
+  .viewopts {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 0 16px 13px; font-size: .78rem; color: var(--muted);
+  }
+  .viewopts label { display: flex; align-items: center; gap: 6px; }
+  .viewopts select {
+    font: inherit; color: var(--ink); background: var(--card);
+    border: 1px solid var(--line); border-radius: 7px; padding: 3px 6px;
+  }
+  .viewopts input[type=range] { width: 92px; accent-color: var(--accent); }
+  .viewopts button {
+    font: inherit; color: var(--ink); background: var(--card); cursor: pointer;
+    border: 1px solid var(--line); border-radius: 7px; padding: 3px 9px;
+  }
+  .viewopts button:hover { border-color: var(--accent); color: var(--accent); }
+  .viewopts .spacer { margin-left: auto; }
+  #map { cursor: crosshair; }
 
   #chartbox { position: relative; padding: 8px 6px 12px; }
   #chart { display: block; width: 100%; height: 190px; }
@@ -113,9 +128,20 @@
     <div class="legend">
       <span>mm/h</span>
       <div style="flex:1">
-        <div class="bar"></div>
+        <canvas id="legend" width="256" height="1" aria-hidden="true"></canvas>
         <div class="ticks"><span>0.1</span><span>1</span><span>5</span><span>20</span><span>80</span></div>
       </div>
+    </div>
+    <div class="viewopts">
+      <label>Colours
+        <select id="palette" aria-label="Radar colour scheme"></select>
+      </label>
+      <label>Opacity
+        <input id="opacity" type="range" min="20" max="100" value="78"
+               aria-label="Radar overlay opacity">
+      </label>
+      <span class="spacer" id="loclabel">Click the map to forecast elsewhere</span>
+      <button id="resetloc" hidden>Back to my location</button>
     </div>
   </div>
 
@@ -142,10 +168,89 @@ L.tileLayer(
   { maxZoom: 12, minZoom: 5, attribution: '&copy; OpenStreetMap, &copy; CARTO | radar: EUMETNET OPERA' }
 ).addTo(map);
 map.setView([50.85, 4.35], 7);
+map.on('click', e => { if (state) setLocation(e.latlng.lat, e.latlng.lng); });
 
 let overlay = null, marker = null, state = null, frame = 0, playing = true, timer = null;
 
 const $ = id => document.getElementById(id);
+
+// --- palette -------------------------------------------------------------
+// The overlay PNGs are single-channel: one byte of rain LEVEL per pixel, no
+// colour at all. The server ships the colour and alpha tables in /api/state, so
+// changing scheme is a canvas repaint of frames already downloaded - no refetch
+// and no server work, which matters when the server is a Raspberry Pi.
+const store = {
+  get(k, d) { try { const v = localStorage.getItem('rain.' + k); return v === null ? d : JSON.parse(v); } catch (e) { return d; } },
+  set(k, v) { try { localStorage.setItem('rain.' + k, JSON.stringify(v)); } catch (e) {} },
+};
+let palette = store.get('palette', null);
+let lutRGB = null, lutA = null;
+const rawFrames = new Map();    // name -> decoded level PNG
+const tinted = new Map();       // name -> data URL under the CURRENT palette
+const tintCanvas = document.createElement('canvas');
+
+function usePalette(name) {
+  if (!state || !state.palettes || !state.palettes[name]) return;
+  palette = name;
+  lutRGB = Uint8ClampedArray.from(state.palettes[name]);
+  lutA = Uint8ClampedArray.from(state.alpha_lut);
+  tinted.clear();                       // every cached frame is now stale
+  store.set('palette', name);
+  $('palette').value = name;
+  drawLegend();
+  if (state.frames) showFrame(Math.min(frame, state.frames.length - 1));
+  drawChart();
+}
+
+function rampColour(t) {            // t in [0,1] -> css colour from the palette
+  const i = Math.max(0, Math.min(255, Math.round(t * 255))) * 3;
+  return lutRGB ? `rgb(${lutRGB[i]},${lutRGB[i + 1]},${lutRGB[i + 2]})` : css('--accent');
+}
+
+function drawLegend() {
+  const cv = $('legend'), g = cv.getContext('2d');
+  const d = g.createImageData(256, 1);
+  for (let l = 0; l < 256; l++) {
+    d.data[l * 4] = lutRGB[l * 3]; d.data[l * 4 + 1] = lutRGB[l * 3 + 1];
+    d.data[l * 4 + 2] = lutRGB[l * 3 + 2]; d.data[l * 4 + 3] = 255;
+  }
+  g.putImageData(d, 0, 0);
+}
+
+function tint(name) {
+  const img = rawFrames.get(name);
+  if (!img || !lutRGB) return null;
+  if (tinted.has(name)) return tinted.get(name);
+  const c = tintCanvas;
+  c.width = img.naturalWidth; c.height = img.naturalHeight;
+  const g = c.getContext('2d', { willReadFrequently: true });
+  g.clearRect(0, 0, c.width, c.height);
+  g.drawImage(img, 0, 0);
+  const d = g.getImageData(0, 0, c.width, c.height), px = d.data;
+  // A greyscale PNG decodes to R=G=B=level, so one channel read gives the level.
+  for (let i = 0; i < px.length; i += 4) {
+    const l = px[i], j = l * 3;
+    px[i] = lutRGB[j]; px[i + 1] = lutRGB[j + 1]; px[i + 2] = lutRGB[j + 2];
+    px[i + 3] = lutA[l];
+  }
+  g.putImageData(d, 0, 0);
+  const url = c.toDataURL('image/png');
+  tinted.set(name, url);
+  return url;
+}
+
+function loadFrame(name) {
+  if (rawFrames.has(name)) return Promise.resolve(rawFrames.get(name));
+  return new Promise(resolve => {
+    const img = new Image();
+    img.onload = () => { rawFrames.set(name, img); resolve(img); };
+    img.onerror = () => resolve(null);
+    // Frame names are reused every cycle (p0, f1, ...) with new content, and
+    // the server sends max-age=300 on them. Without this the browser - and the
+    // cache above - would keep showing the previous cycle's rain.
+    img.src = `./frames/${name}.png?v=${encodeURIComponent(state.updated)}`;
+  });
+}
 const hhmm = iso => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 const relative = m => m === 0 ? 'now' : (m < 0 ? `${-m} min ago` : `in ${m} min`);
 
@@ -166,24 +271,34 @@ function banner(msg) { const b = $('banner'); b.textContent = msg; b.style.displ
 
 function apply(next) {
   const first = !state;
+  const prevUpdated = state && state.updated;
   state = next;
-  $('summary').textContent = state.summary;
+  if (next.updated !== prevUpdated) { rawFrames.clear(); tinted.clear(); }
   $('meta').textContent = `radar ${hhmm(state.updated)} · every ${state.interval_minutes} min`;
-  $('banner').style.display = state.in_coverage ? 'none' : 'block';
-  if (!state.in_coverage) banner('Your location sits outside the radar crop — the graph shows the nearest covered point.');
 
   const bounds = L.latLngBounds(state.bounds);
   if (!overlay) {
-    overlay = L.imageOverlay('', bounds, { opacity: .78, interactive: false }).addTo(map);
+    overlay = L.imageOverlay('', bounds, { opacity: store.get('opacity', 78) / 100, interactive: false }).addTo(map);
     marker = L.circleMarker(state.location, {
       radius: 6, color: '#fff', weight: 2.5, fillColor: '#111', fillOpacity: .9
     }).addTo(map);
     map.fitBounds(bounds.pad(-0.12));
+    $('opacity').value = store.get('opacity', 78);
+    $('palette').innerHTML = Object.keys(state.palettes)
+      .map(n => `<option value="${n}">${n.replace('-', ' ')}</option>`).join('');
   }
-  marker.setLatLng(state.location);
+  // A palette the server no longer offers must not leave the map blank.
+  usePalette(state.palettes[palette] ? palette : (state.default_palette || Object.keys(state.palettes)[0]));
 
-  // Preload every frame so scrubbing and the loop never show a gap.
-  state.frames.forEach(f => { new Image().src = `./frames/${f.name}.png`; });
+  // A moved marker survives the 60 s poll, which otherwise reinstates the
+  // location configured in the add-on options.
+  marker.setLatLng(custom || state.location);
+  applyPoint();
+  if (custom) refreshPoint(custom[0], custom[1]);
+
+  // Preload every frame so scrubbing and the loop never show a gap. Frames are
+  // fetched once per cycle; changing palette only re-tints what is already here.
+  state.frames.forEach(f => loadFrame(f.name));
 
   $('scrub').max = state.frames.length - 1;
   if (first) { frame = state.now_frame; play(true); }
@@ -194,13 +309,17 @@ function apply(next) {
     `echo along its motion rather than fading between frames, so a shower arrives at the ` +
     `minute it arrives. Values are averaged over ~3 km around your location. The shaded ` +
     `band at the bottom is how many of the ${state.n_members ?? 12} forecast members are ` +
-    `wet at that minute — full height means they all agree it rains.`;
+    `wet at that minute — full height means they all agree it rains. The shaded ` +
+    `spread around the line is where 8 of 10, and 5 of 10, of the forecast runs land: ` +
+    `a wide band means the models disagree about how hard it will rain.`;
 }
 
 function showFrame(i) {
   frame = i;
   const f = state.frames[i];
-  overlay.setUrl(`./frames/${f.name}.png`);
+  const url = tint(f.name);
+  if (url) overlay.setUrl(url);
+  else loadFrame(f.name).then(() => { if (frame === i) { const u = tint(f.name); if (u) overlay.setUrl(u); } });
   $('scrub').value = i;
   $('stamp').innerHTML = `${hhmm(f.time)}<small>${relative(f.offset)}</small>`;
   drawChart();
@@ -218,6 +337,53 @@ function play(on) {
 
 $('play').onclick = () => play(!playing);
 $('scrub').oninput = e => { play(false); showFrame(+e.target.value); };
+$('palette').onchange = e => usePalette(e.target.value);
+$('opacity').oninput = e => {
+  if (overlay) overlay.setOpacity(e.target.value / 100);
+  store.set('opacity', +e.target.value);
+};
+
+// --- forecast somewhere else ---------------------------------------------
+// The point curves are the cheap half of a cycle: STEPS runs once over the
+// whole grid (~12 s) and each curve just traces a 3x3 box along the motion
+// field. So /api/point re-derives the rate, probability and fan at any
+// location from the ensemble already in memory, without forecasting again.
+let custom = store.get('location', null);
+
+async function refreshPoint(lat, lon) {
+  try {
+    const r = await fetch(`./api/point?lat=${lat}&lon=${lon}`, { cache: 'no-store' });
+    if (!r.ok) return;
+    Object.assign(state, await r.json());
+    applyPoint();
+  } catch (e) { /* keep the previous curve rather than blanking the chart */ }
+}
+
+function applyPoint() {
+  $('summary').textContent = state.summary;
+  $('banner').style.display = state.in_coverage ? 'none' : 'block';
+  if (!state.in_coverage) banner('That point sits outside the radar crop — the graph shows the nearest covered point.');
+  $('loclabel').textContent = custom
+    ? `Forecasting ${custom[0].toFixed(3)}, ${custom[1].toFixed(3)}`
+    : 'Click the map to forecast elsewhere';
+  $('resetloc').hidden = !custom;
+  drawChart();
+}
+
+function setLocation(lat, lon) {
+  custom = [+lat.toFixed(4), +lon.toFixed(4)];
+  store.set('location', custom);
+  marker.setLatLng(custom);
+  applyPoint();
+  refreshPoint(custom[0], custom[1]);
+}
+
+$('resetloc').onclick = () => {
+  custom = null;
+  store.set('location', null);
+  marker.setLatLng(state.location);
+  refreshPoint(state.location[0], state.location[1]);
+};
 
 function drawChart() {
   if (!state) return;
@@ -246,16 +412,33 @@ function drawChart() {
   g.fillStyle = dark ? 'rgba(255,255,255,.035)' : 'rgba(16,32,48,.035)';
   g.fillRect(x(0), padT, w - padR - x(0), h - padT - padB);
 
-  // Rain area, coloured by the same ramp as the map.
+  // Uncertainty fan, drawn BEFORE the mean so the line always reads on top.
+  // Two bands: 10-90 (the outer, faint) and 25-75 (inner, stronger). Rain is
+  // skewed and bounded at zero, so these are percentiles of the 12 members
+  // rather than mean +/- spread, which would put the lower edge below zero.
+  const { p10, p25, p75, p90 } = state.series;
+  if (p10 && p90) {
+    const fan = (lowArr, highArr, alpha) => {
+      g.beginPath();
+      minutes.forEach((m, i) => i ? g.lineTo(x(m), y(highArr[i])) : g.moveTo(x(m), y(highArr[i])));
+      for (let i = minutes.length - 1; i >= 0; i--) g.lineTo(x(minutes[i]), y(lowArr[i]));
+      g.closePath();
+      g.fillStyle = css('--accent'); g.globalAlpha = alpha; g.fill(); g.globalAlpha = 1;
+    };
+    fan(p10, p90, .16);
+    if (p25 && p75) fan(p25, p75, .16);   // overlaps, so the middle reads darker
+  }
+
+  // Rain area, coloured by the same ramp as the map - read from the active
+  // palette rather than hardcoded, so the chart follows the colour picker.
   const grad = g.createLinearGradient(0, y(80), 0, y(0));
-  [[0,'#c832b4'],[.2,'#eb3c3c'],[.4,'#f5d73c'],[.6,'#3ccd5a'],[.8,'#2f8ceb'],[1,'#96c8ff']]
-    .forEach(([s, c]) => grad.addColorStop(s, c));
+  for (let s = 0; s <= 1; s += .1) grad.addColorStop(s, rampColour(1 - s));
   g.beginPath();
   g.moveTo(x(minutes[0]), y(0));
   minutes.forEach((m, i) => g.lineTo(x(m), y(values[i])));
   g.lineTo(x(minutes.at(-1)), y(0));
   g.closePath();
-  g.fillStyle = grad; g.globalAlpha = .8; g.fill(); g.globalAlpha = 1;
+  g.fillStyle = grad; g.globalAlpha = .62; g.fill(); g.globalAlpha = 1;
   g.strokeStyle = css('--accent'); g.lineWidth = 1.6;
   g.beginPath();
   minutes.forEach((m, i) => i ? g.lineTo(x(m), y(values[i])) : g.moveTo(x(m), y(values[i])));
@@ -302,8 +485,10 @@ $('chartbox').addEventListener('pointermove', e => {
   tip.style.opacity = 1;
   tip.style.left = `${e.clientX - $('chartbox').getBoundingClientRect().left}px`;
   tip.style.top = `${r.top - $('chartbox').getBoundingClientRect().top + r.height * .55}px`;
-  const p = state.series.probability;
-  tip.textContent = `${values[i].toFixed(2)} mm/h · ${relative(minutes[i])}`
+  const p = state.series.probability, lo = state.series.p10, hi = state.series.p90;
+  const range = (lo && hi && hi[i] - lo[i] > 0.05)
+    ? ` (${lo[i].toFixed(1)}–${hi[i].toFixed(1)})` : '';
+  tip.textContent = `${values[i].toFixed(2)}${range} mm/h · ${relative(minutes[i])}`
     + (p ? ` · ${Math.round(p[i] * 100)}% of members wet` : '');
   // Snap the map to the frame nearest the cursor.
   play(false);

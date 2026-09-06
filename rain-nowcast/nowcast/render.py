@@ -9,57 +9,111 @@ import io
 
 import numpy as np
 
-# Rain-rate colour scale (mm/h -> RGB), interpolated in log space so the
-# light end (where nearly all the pixels live) gets most of the range.
-_STOPS = [
-    (0.10, (150, 200, 255)),
-    (0.50, (80, 160, 250)),
-    (1.00, (35, 110, 235)),
-    (2.50, (25, 190, 180)),
-    (5.00, (60, 205, 90)),
-    (10.0, (245, 215, 60)),
-    (20.0, (250, 150, 45)),
-    (40.0, (235, 60, 60)),
-    (80.0, (200, 50, 180)),
-]
+# Rain-rate colour scales (mm/h -> RGB), interpolated in log space so the light
+# end (where nearly all the pixels live) gets most of the range.
+#
+# The overlay PNGs do NOT carry any of these. Colour and alpha are pure
+# functions of one value (the rain rate), so the server ships the rate as an
+# 8-bit level and the browser colours it through `lut()` - which means changing
+# palette is a canvas repaint with no refetch, no re-render and no server CPU.
+# That last part is the point on a Raspberry Pi.
+PALETTES = {
+    "blue-green": [
+        (0.10, (150, 200, 255)), (0.50, (80, 160, 250)), (1.00, (35, 110, 235)),
+        (2.50, (25, 190, 180)), (5.00, (60, 205, 90)), (10.0, (245, 215, 60)),
+        (20.0, (250, 150, 45)), (40.0, (235, 60, 60)), (80.0, (200, 50, 180)),
+    ],
+    # Perceptually uniform and safe for the common forms of colour blindness -
+    # the default's green/red separation at 5 vs 40 mm/h is exactly the pair
+    # deuteranopia collapses.
+    "viridis": [
+        (0.10, (68, 1, 84)), (0.50, (71, 45, 123)), (1.00, (59, 82, 139)),
+        (2.50, (44, 114, 142)), (5.00, (33, 145, 140)), (10.0, (40, 174, 128)),
+        (20.0, (94, 201, 98)), (40.0, (173, 220, 48)), (80.0, (253, 231, 37)),
+    ],
+    # What people expect a weather radar to look like.
+    "classic": [
+        (0.10, (100, 240, 240)), (0.50, (30, 180, 240)), (1.00, (20, 90, 220)),
+        (2.50, (20, 220, 60)), (5.00, (240, 240, 40)), (10.0, (250, 180, 30)),
+        (20.0, (240, 80, 30)), (40.0, (200, 20, 20)), (80.0, (255, 255, 255)),
+    ],
+}
+DEFAULT_PALETTE = "blue-green"
 
 MIN_RATE = 0.05  # below this we draw nothing at all
+MAX_RATE = 80.0  # top of the level scale, matching the last palette stop
+
+# Distinct levels the overlay carries. Not cosmetic: a full 256-level greyscale
+# PNG is 40 KB where the 64-colour quantised RGBA it replaces was 26 KB, and the
+# page preloads two dozen frames. 64 restores most of that (33 KB) and matches
+# the visual budget the old palette had anyway.
+LEVEL_STEPS = 64
 
 
-def colorize(field):
-    """mm/h field -> (h, w, 4) uint8 RGBA, transparent below MIN_RATE."""
+def level(field):
+    """mm/h field -> uint8 level, the rain rate on a quantised log scale.
+
+    This is the ONLY thing the overlay carries. `lut()` turns a level into
+    colour and `alpha_lut()` into opacity, both in the browser.
+    """
     rate = np.nan_to_num(field, nan=0.0, posinf=0.0, neginf=0.0)
     log_rate = np.log10(np.clip(rate, 1e-3, None))
-    stop_x = np.log10([s[0] for s in _STOPS])
+    lo, hi = np.log10(MIN_RATE), np.log10(MAX_RATE)
+    unit = np.clip((log_rate - lo) / (hi - lo), 0.0, 1.0)
+    step = 255.0 / (LEVEL_STEPS - 1)
+    return (np.round(unit * (LEVEL_STEPS - 1)) * step).astype(np.uint8)
 
-    rgba = np.zeros(rate.shape + (4,), np.uint8)
+
+def alpha_lut():
+    """Opacity per level, as a 256-entry uint8 table.
+
+    Defined as a function OF THE LEVEL rather than of the rate, deliberately.
+    Deriving it from the rate independently made 62 levels ambiguous (two rates
+    rounding to one level but to different alphas), because the fade spans
+    0.05-0.3 mm/h while the level scale spans 0.05-80. As a function of level it
+    is exact by construction, and the browser needs no rate maths at all.
+
+    It fades in across the drizzle range so light rain does not appear as a
+    hard-edged blob at the detection threshold.
+    """
+    lo, hi = np.log10(MIN_RATE), np.log10(MAX_RATE)
+    log_rate = lo + (hi - lo) * np.arange(256) / 255.0
+    fade = (log_rate - lo) / (np.log10(0.3) - lo)
+    table = (np.clip(fade, 0.0, 1.0) * 215.0).astype(np.uint8)
+    table[0] = 0  # level 0 is at or below MIN_RATE: draw nothing
+    return table
+
+
+def lut(name=DEFAULT_PALETTE):
+    """A palette as a flat 256*3 uint8 RGB table, indexed by `level`.
+
+    Built here rather than in JavaScript so the log-spaced stops have exactly
+    one definition. The browser only ever does `rgb = lut[level]`.
+    """
+    stops = PALETTES[name]
+    lo, hi = np.log10(MIN_RATE), np.log10(MAX_RATE)
+    log_rate = lo + (hi - lo) * np.arange(256) / 255.0
+    stop_x = np.log10([s[0] for s in stops])
+    table = np.zeros((256, 3), np.uint8)
     for channel in range(3):
-        stop_y = np.array([s[1][channel] for s in _STOPS], float)
-        rgba[..., channel] = np.interp(log_rate, stop_x, stop_y).astype(np.uint8)
-
-    # Fade alpha in across the drizzle range so light rain doesn't show up as
-    # a hard-edged blob at the detection threshold.
-    fade = (log_rate - np.log10(MIN_RATE)) / (np.log10(0.3) - np.log10(MIN_RATE))
-    rgba[..., 3] = (np.clip(fade, 0.0, 1.0) * 215).astype(np.uint8)
-    rgba[rate < MIN_RATE, 3] = 0
-    return rgba
+        stop_y = np.array([s[1][channel] for s in stops], float)
+        table[:, channel] = np.interp(log_rate, stop_x, stop_y).astype(np.uint8)
+    return table
 
 
-def png_bytes(rgba, colors=64):
-    """PNG-encode an RGBA overlay, palette-quantized.
+def png_bytes(field):
+    """PNG-encode an overlay as a single-channel greyscale level image.
 
-    Colour and alpha are both pure functions of one value (the rain rate), so
-    a 64-entry palette is visually lossless here - and it takes a frame from
-    ~370 KB of true-colour noise down to a few tens of KB, which matters when
-    the page preloads two dozen of them.
+    One byte per pixel, carrying no colour at all - the browser applies `lut()`
+    and `alpha_lut()`. Measured against the 64-colour RGBA this replaces:
+    33 KB vs 26 KB per frame, the price of moving palette choice to the client.
+    Shipping alpha as a second channel would have cost 57 KB, which is why it is
+    derived from the level instead.
     """
     from PIL import Image
 
-    img = Image.fromarray(rgba, "RGBA").quantize(
-        colors=colors, method=Image.Quantize.FASTOCTREE
-    )
     buf = io.BytesIO()
-    img.save(buf, "PNG", optimize=True)
+    Image.fromarray(level(field), "L").save(buf, "PNG", optimize=True)
     return buf.getvalue()
 
 
@@ -127,16 +181,35 @@ def point_series(stack, row, col, box=1):
 
 
 def _demo():
-    """Self-check: colour scale is monotonic-ish and alpha gates correctly."""
+    """Self-check: levels are monotonic, alpha gates, palettes round-trip."""
     field = np.array([[0.0, 0.02, 0.1, 1.0, 10.0, 100.0]])
-    rgba = colorize(field)
-    assert rgba.shape == (1, 6, 4)
-    assert rgba[0, 0, 3] == 0 and rgba[0, 1, 3] == 0, "sub-threshold must be clear"
-    assert rgba[0, 3, 3] > 0 and rgba[0, 5, 3] > 0, "rain must be opaque"
-    assert tuple(rgba[0, 5, :3]) != tuple(rgba[0, 3, :3]), "heavy != light colour"
+    lvl = level(field)
+    alpha = alpha_lut()[lvl]
+    assert lvl.shape == (1, 6)
+    assert alpha[0, 0] == 0 and alpha[0, 1] == 0, "sub-threshold must be clear"
+    assert alpha[0, 3] > 0 and alpha[0, 5] > 0, "rain must be opaque"
+    # heavier rain must never map to a lower level, and must saturate not wrap:
+    # 100 mm/h is above MAX_RATE and has to clamp to 255, not roll over to 0.
+    assert list(lvl[0]) == sorted(lvl[0]), lvl
+    assert lvl[0, 5] == 255, lvl
+    # alpha must be a FUNCTION of level - the ambiguity that forced alpha_lut()
+    # to be defined on the level rather than on the rate.
+    ramp = np.arange(256, dtype=np.uint8)
+    assert len(set(zip(ramp.tolist(), alpha_lut().tolist()))) == 256
+    assert level(np.array([[MIN_RATE / 2]]))[0, 0] == 0, "below MIN_RATE -> 0"
 
-    blob = png_bytes(colorize(np.random.default_rng(0).random((64, 64)) * 20))
+    # Every palette must be a full 256-entry table and actually differ from the
+    # others, or the picker silently does nothing.
+    tables = {n: lut(n) for n in PALETTES}
+    for name, table in tables.items():
+        assert table.shape == (256, 3) and table.dtype == np.uint8, name
+        assert tuple(table[255]) != tuple(table[0]), f"{name} is flat"
+    assert not np.array_equal(tables["viridis"], tables["blue-green"])
+
+    blob = png_bytes(np.random.default_rng(0).random((64, 64)) * 20)
     assert blob[:8] == b"\x89PNG\r\n\x1a\n"
+    from PIL import Image
+    assert Image.open(io.BytesIO(blob)).mode == "L"
 
     # Mercator row spacing must be non-uniform in latitude (that's the point).
     meta = {

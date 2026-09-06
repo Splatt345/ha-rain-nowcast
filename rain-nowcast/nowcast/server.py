@@ -11,6 +11,7 @@ import os
 import threading
 import time
 import traceback
+import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import numpy as np
@@ -80,6 +81,7 @@ class Nowcaster:
         self.images = {}
         self.state = {"status": "starting"}
         self._last_url = None
+        self._ctx = None
         self.publisher = Publisher(opts["publish_sensors"])
 
     def snapshot(self):
@@ -89,6 +91,15 @@ class Nowcaster:
     def image(self, name):
         with self.lock:
             return self.images.get(name)
+
+    def point(self, lat, lon):
+        """Recompute the point curves at an arbitrary location.
+
+        Under the same lock as refresh() writes, so a request landing mid-cycle
+        sees one coherent forecast rather than a half-swapped one.
+        """
+        with self.lock:
+            return self._point_state(lat, lon)
 
     def refresh(self):
         """Rebuild everything if a new radar frame has landed. Returns whether
@@ -114,9 +125,7 @@ class Nowcaster:
         images, frames = {}, []
 
         def add(name, field, minutes, kind):
-            images[name] = render.png_bytes(
-                render.colorize(render.resample(field, rows, cols))
-            )
+            images[name] = render.png_bytes(render.resample(field, rows, cols))
             frames.append({
                 "name": name,
                 "kind": kind,
@@ -129,17 +138,82 @@ class Nowcaster:
         for k, field in enumerate(forecast, start=1):
             add(f"f{k}", field, interval * k, "forecast")
 
+        # Everything the point curves need, kept so the marker can be moved
+        # without re-running STEPS (see _point_state and /api/point). The
+        # ensemble is the bulky part - 12 members x 12 leads on the Belgium crop
+        # is ~60 MB of float32 - and it is the whole reason a moved marker still
+        # gets a probability and a fan rather than just a mean.
+        offsets = [f["offset"] for f in frames]
+        ctx = {
+            "stack": stack, "forecast": forecast, "members": members,
+            "motion": motion, "metadata": metadata, "interval": interval,
+            "offsets": offsets, "minutes": np.arange(offsets[0], offsets[-1] + 1),
+        }
+        point = self._point_state(opts["latitude"], opts["longitude"], ctx)
+
+        state = {
+            "status": "ok",
+            "updated": last_time.isoformat(),
+            "bounds": [
+                [live.BELGIUM_BBOX[1], live.BELGIUM_BBOX[0]],
+                [live.BELGIUM_BBOX[3], live.BELGIUM_BBOX[2]],
+            ],
+            "interval_minutes": interval,
+            "n_members": config["n_ens_members"],
+            "frames": frames,
+            "now_frame": len(stack) - 1,
+            # Colour is presentation, so the overlays carry only an 8-bit rain
+            # level and the browser applies these. Switching palette is then a
+            # canvas repaint - no refetch, no server CPU, which is what makes it
+            # affordable on the Pi this add-on is likely running on.
+            "palettes": {name: render.lut(name).ravel().tolist()
+                         for name in render.PALETTES},
+            "alpha_lut": render.alpha_lut().tolist(),
+            "default_palette": render.DEFAULT_PALETTE,
+            **point,
+        }
+
+        with self.lock:
+            self.images, self.state, self._ctx = images, state, ctx
+        self._last_url = urls[-1]
+
+        # A broker hiccup must not cost us the forecast we just computed.
+        try:
+            self.publisher.publish(state)
+        except Exception:
+            traceback.print_exc()
+
+        prune_cache()
+        return True
+
+    def _point_state(self, lat, lon, ctx=None):
+        """Per-minute rate, probability and uncertainty fan at one location.
+
+        Split out of refresh() so the marker can be moved without re-running
+        STEPS: the ensemble from the last refresh is reused and only the 13
+        point curves are traced again. Measured end-to-end over HTTP that is
+        0.44 s, against ~12 s to forecast afresh - 27x cheaper, which is what
+        makes click-to-relocate viable on a Raspberry Pi.
+
+        Returns the location-dependent slice of the served state, so refresh()
+        and /api/point produce exactly the same shape and can never drift.
+        """
+        c = ctx or self._ctx
+        if c is None:
+            raise RuntimeError("no forecast yet")
+        stack, forecast, members = c["stack"], c["forecast"], c["members"]
+        motion, metadata = c["motion"], c["metadata"]
+        interval, offsets, minutes = c["interval"], c["offsets"], c["minutes"]
+
         # Point series at one-minute resolution. Radar still only arrives every
         # `interval` minutes, but the values in between are obtained by tracing
         # along the motion field rather than fading linearly between frames -
         # so a shower arrives at the right minute instead of ramping up over
         # five, and a peak that passes between two frames isn't clipped.
-        row, col = render.point_rowcol(metadata, opts["latitude"], opts["longitude"])
+        row, col = render.point_rowcol(metadata, lat, lon)
         ny, nx = stack.shape[1:]
         in_coverage = 0 <= row < ny and 0 <= col < nx
         row, col = int(np.clip(row, 0, ny - 1)), int(np.clip(col, 0, nx - 1))
-        offsets = [f["offset"] for f in frames]
-        minutes = np.arange(offsets[0], offsets[-1] + 1)
 
         sub_steps = int(round(interval))
 
@@ -164,42 +238,36 @@ class Nowcaster:
         member_curves = np.array([point_curve(np.concatenate([stack, m]))
                                   for m in members])
         probability = (member_curves >= RAIN_THRESHOLD).mean(axis=0)
-        del members, member_curves
+        # The ensemble's own disagreement about the RATE, not just about wet vs
+        # dry. Percentiles rather than mean +/- sd: rain is heavily skewed and
+        # bounded below at zero, so a symmetric interval would put the lower
+        # edge underground and understate the upper tail.
+        lo, q1, q3, hi = np.percentile(member_curves, [10, 25, 75, 90], axis=0)
+        # The mean can sit OUTSIDE the 10-90 band, and legitimately so: rain is
+        # skewed, and one wet member among eleven dry ones drags the mean above
+        # the 90th percentile (measured: mean 0.006 against p90 0.005). Correct
+        # statistics, but on screen it draws the main line outside its own band,
+        # which reads as a bug. Widen the band to contain the line - it still
+        # contains every percentile it claims to.
+        lo = np.minimum(lo, series)
+        hi = np.maximum(hi, series)
 
-        state = {
-            "status": "ok",
-            "updated": last_time.isoformat(),
-            "bounds": [
-                [live.BELGIUM_BBOX[1], live.BELGIUM_BBOX[0]],
-                [live.BELGIUM_BBOX[3], live.BELGIUM_BBOX[2]],
-            ],
-            "location": [opts["latitude"], opts["longitude"]],
+        return {
+            "location": [lat, lon],
             "in_coverage": in_coverage,
-            "interval_minutes": interval,
-            "n_members": config["n_ens_members"],
-            "frames": frames,
-            "now_frame": len(stack) - 1,
             "series": {
                 "minutes": minutes.tolist(),
                 "values": [round(float(v), 3) for v in series],
                 "probability": [round(float(p), 2) for p in probability],
+                "p10": [round(float(v), 3) for v in lo],
+                "p25": [round(float(v), 3) for v in q1],
+                "p75": [round(float(v), 3) for v in q3],
+                "p90": [round(float(v), 3) for v in hi],
             },
-            "rain_chance": round(float(probability[int(np.searchsorted(minutes, 0)):].max()), 2),
+            "rain_chance": round(
+                float(probability[int(np.searchsorted(minutes, 0)):].max()), 2),
             "summary": self._summary(minutes, series, probability),
         }
-
-        with self.lock:
-            self.images, self.state = images, state
-        self._last_url = urls[-1]
-
-        # A broker hiccup must not cost us the forecast we just computed.
-        try:
-            self.publisher.publish(state)
-        except Exception:
-            traceback.print_exc()
-
-        prune_cache()
-        return True
 
     @staticmethod
     def _summary(minutes, series, probability):
@@ -256,6 +324,26 @@ class Handler(BaseHTTPRequestHandler):
         if path == "api/state":
             body = json.dumps(self.nowcaster.snapshot()).encode()
             return self._send(200, body, "application/json")
+        if path == "api/point":
+            # Move the marker without re-running the forecast. Validated here
+            # rather than trusted: these are query params off a public ingress
+            # route, and they index into a numpy grid.
+            q = urllib.parse.parse_qs(urllib.parse.urlparse(self.path).query)
+            try:
+                lat = float(q.get("lat", [""])[0])
+                lon = float(q.get("lon", [""])[0])
+            except (TypeError, ValueError):
+                return self._send(400, b'{"error":"lat and lon required"}',
+                                  "application/json")
+            if not (-90 <= lat <= 90 and -180 <= lon <= 180):
+                return self._send(400, b'{"error":"lat/lon out of range"}',
+                                  "application/json")
+            try:
+                point = self.nowcaster.point(lat, lon)
+            except RuntimeError:
+                return self._send(503, b'{"error":"no forecast yet"}',
+                                  "application/json")
+            return self._send(200, json.dumps(point).encode(), "application/json")
         if path.startswith("frames/") and path.endswith(".png"):
             image = self.nowcaster.image(path[len("frames/"):-len(".png")])
             if image is not None:

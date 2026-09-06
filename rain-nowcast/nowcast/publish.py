@@ -209,6 +209,8 @@ class Publisher:
             "forecast_minutes": state["series"]["minutes"],
             "forecast_values": state["series"]["values"],
             "forecast_probability": state["series"].get("probability"),
+            "forecast_low": state["series"].get("p10"),
+            "forecast_high": state["series"].get("p90"),
             "latitude": state["location"][0],
             "longitude": state["location"][1],
         }

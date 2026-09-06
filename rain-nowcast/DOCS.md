@@ -86,12 +86,38 @@ automation:
 
 ## How good is it?
 
-Backtested against real RMI radar (see the repository README for the full
-method): CSI@1mm/h of 0.74 at 5 min, 0.40 at 30 min, 0.18 at 60 min, with a
-held-out mean of 0.35. In plain terms — **the first half hour is genuinely
+Measured on **20 independent Belgian events** (2021–2024, KNMI 1 km 5-minute
+composites), scored only on the 10 the model was never tuned against:
+
+| lead | 5 min | 15 min | 30 min | 45 min | 60 min |
+|---|---|---|---|---|---|
+| CSI@1mm/h | 0.72 | 0.55 | 0.41 | 0.31 | 0.25 |
+
+Held-out mean 0.404. In plain terms — **the first half hour is genuinely
 useful, the second half hour is a hint**. This is a known limit of pure
 extrapolation: it moves existing rain around correctly but cannot predict
 showers forming or dying.
+
+It does not invent rain. On 10 near-dry events it predicted wet pixels 23×
+*less* often than they actually occurred: the failure mode is being too
+cautious, not crying wolf.
+
+### What `rain_chance` is worth, and where it isn't
+
+The probability was scored, not assumed (Brier skill score 0.44 at 1 mm/h).
+Two honest limits worth knowing before you automate on it:
+
+- **Above about 40% it over-promises.** When it says 75% it rains 68% of the
+  time; at 92% it rains 82%. Below 40% it is accurate or slightly pessimistic.
+- **It has essentially no skill about *heavy* rain.** At the 5 mm/h level the
+  measured resolution collapses to almost zero. The system can tell you whether
+  it will rain, not whether it will rain hard — so `peak_rate` is fine for
+  "bring the washing in" and should not carry a flood-response automation.
+
+The shaded band on the chart is the ensemble's own disagreement about the rate,
+and it is a real signal: wider band genuinely means larger error (correlation
+0.57). It is, however, about 21% narrower than the errors actually are, so treat
+it as the optimistic edge of the uncertainty rather than the full extent.
 
 The radar updates every 5 minutes, but the per-minute line is not a linear
 fade between frames: values in between are found by tracing along the motion

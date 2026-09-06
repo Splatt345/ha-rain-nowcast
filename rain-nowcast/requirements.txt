@@ -1,10 +1,23 @@
-pysteps>=1.11
-numpy>=1.24
-scipy>=1.10
-opencv-python-headless>=4.9
-h5py>=3.10
-pyproj>=3.6
-pillow>=10.0
-requests>=2.31
-dask>=2024.1
-paho-mqtt>=2.1
+# PINNED, not floated, and numpy/scipy are the reason.
+#
+# Every accuracy number this add-on claims (CSI 0.4043 held-out, the CRPS
+# baseline, the measured reliability of `rain_chance`) came from the research
+# repo's venv on numpy 2.2.6 / scipy 1.15.3. With `>=` bounds a rebuild shipped
+# numpy 2.5.2 / scipy 1.18.1 instead - a forecaster nobody had scored, changing
+# silently and only on rebuild. pysteps' cascade decomposition and AR(2) update
+# run entirely through numpy/scipy FFT and filtering, so that is exactly where a
+# quiet numerical change would land.
+#
+# Bump deliberately and re-run the research repo's evaluation, rather than by
+# editing a bound here. Python differs from the research venv (3.12 here, 3.10
+# there) because Home Assistant's base image sets it: a known, accepted gap.
+pysteps==1.21.5
+numpy==2.2.6
+scipy==1.15.3
+opencv-python-headless==5.0.0.93
+h5py==3.16.0
+pyproj==3.7.1
+pillow==12.3.0
+requests==2.34.2
+dask==2026.8.0
+paho-mqtt==2.1.0

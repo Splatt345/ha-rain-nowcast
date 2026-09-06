@@ -8,9 +8,11 @@ ingress: true
 ingress_port: 8099
 panel_icon: mdi:weather-pouring
 panel_title: Rain
+# amd64 only, deliberately. aarch64 was advertised but never shipped, so a Pi
+# install would have failed at pull time; declaring only what is built means the
+# Supervisor hides the add-on there instead.
 arch:
   - amd64
-  - aarch64
 # Sensors go out over MQTT when a broker is configured, and fall back to the
 # core REST API when there isn't one.
 homeassistant_api: true

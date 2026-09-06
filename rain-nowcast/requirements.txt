@@ -21,3 +21,11 @@ pillow==12.3.0
 requests==2.34.2
 dask==2026.8.0
 paho-mqtt==2.1.0
+
+# CPU-only torch for the SmaAt-UNet second opinion. The CPU index is not
+# optional: the default PyPI wheel pulls the whole CUDA runtime and adds
+# multiple GB to an image that has no GPU to use it with. Inference is 0.6 s per
+# cycle on 4 CPU threads against STEPS' ~12 s, so the cost here is image size
+# (~200 MB), not runtime.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.6.0+cpu

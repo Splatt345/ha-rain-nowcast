@@ -25,6 +25,7 @@ PORT = int(os.environ.get("PORT", "8099"))
 POLL_SECONDS = 120  # how often we check for a new frame (cheap: one list call)
 RAIN_THRESHOLD = 0.1  # mm/h; below this, call it dry
 CACHE_KEEP_MINUTES = 180
+MODEL_WEIGHTS = os.path.join(os.path.dirname(__file__), "..", "models", "smaat.pt")
 
 
 def load_options():
@@ -49,6 +50,15 @@ def load_options():
     if api_key:
         os.environ["ORD_API_KEY"] = api_key  # live._session() picks it up here
 
+    # Broker settings for installs with no Supervisor to ask (Home Assistant
+    # Container, docker-compose). Left empty on HA OS, where publish._broker()
+    # still prefers the Supervisor. Passed through the environment because that
+    # is how api_key already reaches live._session().
+    for key in ("mqtt_host", "mqtt_port", "mqtt_username", "mqtt_password"):
+        value = opt(key, "", str)
+        if value:
+            os.environ[key.upper()] = str(value)
+
     # options.json gives a real bool; an env var gives a string, and bool("false")
     # is True, so parse rather than cast.
     def yes_no(v):
@@ -61,6 +71,11 @@ def load_options():
         "forecast_minutes": opt("forecast_minutes", 60, int),
         "ensemble_members": opt("ensemble_members", 12, int),
         "publish_sensors": opt("publish_sensors", True, yes_no),
+        # SmaAt-UNet second opinion. On by default: it passed the project's
+        # pre-registered CRPS gate by 3.3x the floor on 25/30 windows. Turn it
+        # off to run plain STEPS (slightly faster, and the only option if the
+        # weights file is removed to save ~16 MB).
+        "use_model": opt("use_model", True, yes_no),
     }
 
 
@@ -82,6 +97,8 @@ class Nowcaster:
         self.state = {"status": "starting"}
         self._last_url = None
         self._ctx = None
+        self._model_ok = False
+        self._model_failed = False
         self.publisher = Publisher(opts["publish_sensors"])
 
     def snapshot(self):
@@ -118,6 +135,7 @@ class Nowcaster:
         config = {**BASELINE_CONFIG, "n_ens_members": opts["ensemble_members"]}
         forecast, motion, members = run_forecast(stack, metadata, config, n_lead,
                                                  return_extras=True)
+        members, forecast = self._apply_model(stack, members, forecast, n_lead)
 
         last_time = timestamps[-1] or datetime.datetime.now(datetime.timezone.utc)
         rows, cols, _ = render.mercator_sampler(metadata, live.BELGIUM_BBOX)
@@ -185,6 +203,48 @@ class Nowcaster:
 
         prune_cache()
         return True
+
+    def _apply_model(self, stack, members, forecast, n_lead):
+        """Shift the STEPS ensemble toward the SmaAt-UNet forecast.
+
+        Returns (members, mean) unchanged if the model is switched off, torch is
+        absent, the weights are missing, or inference fails. A nowcast that
+        stops working because a neural network could not load is a worse product
+        than one without the network, so every failure here degrades to plain
+        STEPS and says so once.
+
+        Why combine rather than replace: measured head-to-head on 30 CIRRUS
+        validation windows, SmaAt-UNet produces the better single field (mm/h
+        MAE 0.290 against 0.351 at +5 min, 0.556 against 0.823 at +60) but LOSES
+        on CRPS, 0.459 to 0.386, because it is deterministic and the add-on
+        serves a probability. Combining keeps the ensemble and gains on the
+        gate: dCRPS +0.01674 on 25/30 windows, 3.3x the pre-registered floor.
+        """
+        if not self.opts.get("use_model", True) or self._model_failed:
+            return members, forecast
+        try:
+            from nowcast import combine
+            from nowcast.smaat import forecast as ml_forecast
+
+            ml = ml_forecast(np.asarray(stack, dtype=np.float32), n_lead,
+                             weights=MODEL_WEIGHTS, device="cpu")
+            w = combine.WEIGHTS[:n_lead] if n_lead <= len(combine.WEIGHTS) else \
+                np.pad(combine.WEIGHTS, (0, n_lead - len(combine.WEIGHTS)),
+                       mode="edge")
+            shifted = combine.combine(members, ml, w)
+            if not np.isfinite(shifted).any():
+                raise ValueError("combined forecast is entirely non-finite")
+            if not self._model_ok:
+                print(f"Forecast: STEPS + SmaAt-UNet (weights {w[0]:.2f}-{w[-1]:.2f})")
+                self._model_ok = True
+            return shifted, np.nanmean(shifted, axis=0)
+        except Exception as exc:
+            # once, not every cycle - this runs every 5 minutes forever
+            self._model_failed = True
+            print(f"Forecast: model unavailable ({type(exc).__name__}: {exc}); "
+                  "using STEPS alone")
+            traceback.print_exc()
+            return members, forecast
 
     def _point_state(self, lat, lon, ctx=None):
         """Per-minute rate, probability and uncertainty fan at one location.

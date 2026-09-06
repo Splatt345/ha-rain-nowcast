@@ -95,17 +95,36 @@ class Publisher:
 
     # -- MQTT ---------------------------------------------------------------
     def _broker(self):
-        """Ask the Supervisor for the configured broker (services: mqtt:want)."""
-        if not self.token:
+        """Broker settings: the Supervisor first, then explicit configuration.
+
+        The Supervisor path (services: mqtt:want) is preferred and unchanged -
+        on Home Assistant OS or Supervised there is nothing to fill in. But it
+        was the ONLY path, and it does not exist on Home Assistant Container or
+        a plain docker-compose install: no Supervisor means no token, which
+        meant no MQTT and no REST fallback either, so the add-on published
+        nothing at all and reported only "not publishing". The explicit
+        fallback makes those installs work, and makes this path testable
+        against a real broker outside a full HA OS.
+        """
+        if self.token:
+            try:
+                r = requests.get(
+                    "http://supervisor/services/mqtt",
+                    headers={"Authorization": f"Bearer {self.token}"}, timeout=10)
+                if r.status_code == 200:
+                    return r.json()["data"]
+            except (requests.RequestException, KeyError, ValueError):
+                pass
+
+        host = (os.environ.get("MQTT_HOST") or "").strip()
+        if not host:
             return None
-        try:
-            r = requests.get("http://supervisor/services/mqtt",
-                             headers={"Authorization": f"Bearer {self.token}"}, timeout=10)
-            if r.status_code != 200:
-                return None
-            return r.json()["data"]
-        except (requests.RequestException, KeyError, ValueError):
-            return None
+        return {"host": host,
+                "port": int(os.environ.get("MQTT_PORT") or 1883),
+                "username": os.environ.get("MQTT_USERNAME") or "",
+                "password": os.environ.get("MQTT_PASSWORD") or "",
+                "ssl": str(os.environ.get("MQTT_SSL", "")).lower()
+                       in ("1", "true", "yes", "on")}
 
     def _connect_mqtt(self):
         cfg = self._broker()

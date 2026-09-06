@@ -25,6 +25,8 @@ COPY --from=builder /install /usr/local
 
 COPY nowcast /app/nowcast
 COPY web /app/web
+# Trained SmaAt-UNet weights (~16 MB). Absent -> server falls back to STEPS.
+COPY models /app/models
 
 WORKDIR /app
 ENV PYTHONUNBUFFERED=1 \

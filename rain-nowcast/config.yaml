@@ -26,6 +26,14 @@ options:
   forecast_minutes: 60
   ensemble_members: 12
   publish_sensors: true
+  use_model: true
+  # Leave empty on Home Assistant OS/Supervised: the Supervisor supplies the
+  # broker. Only needed on Home Assistant Container or docker-compose, where
+  # there is no Supervisor to ask and sensors would otherwise not publish.
+  mqtt_host: ""
+  mqtt_port: 1883
+  mqtt_username: ""
+  mqtt_password: ""
 schema:
   latitude: float
   longitude: float
@@ -34,3 +42,8 @@ schema:
   forecast_minutes: int(15,120)
   ensemble_members: int(1,24)
   publish_sensors: bool
+  use_model: bool
+  mqtt_host: str?
+  mqtt_port: int(1,65535)?
+  mqtt_username: str?
+  mqtt_password: password?

@@ -33,6 +33,11 @@ with GitHub/Google/Azure AD, no approval wait) and paste it into `api_key`.
 
 ## Options
 
+Set these in the add-on's **Configuration** tab, where each one is labelled and
+explained. The two that most often go wrong: `latitude`/`longitude` must be
+inside the radar area, and `mqtt_host` must be left **empty** on Home Assistant
+OS, where the Supervisor supplies the broker.
+
 | Option | Default | What it does |
 |---|---|---|
 | `latitude` / `longitude` | Brussels | The point the minute-by-minute graph is for. Must be inside the radar crop (roughly Belgium plus a margin: 2.0–6.8°E, 49.0–51.8°N). |

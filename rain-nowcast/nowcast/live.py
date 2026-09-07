@@ -157,6 +157,74 @@ def download_composite(url, session=None):
     return local_path
 
 
+ISOLATED_THR = 0.1  # mm/h; the same wet threshold the sensors use
+
+
+def drop_time_isolated(stack, thr=ISOLATED_THR):
+    """Remove echo that is wet in one frame and dry either side of it.
+
+    The OPERA composite is a mosaic of national radars, and a contributing
+    radar's rectangular sector can drop in and out between timesteps. Measured
+    live: a ~3000-pixel rectangle switching on and off frame to frame -
+    3033, 2727, 2787, 1243, 2784, 0, 3224, 0, 0 ... - which is what made a chunk
+    of the map appear and disappear as the loop played.
+
+    Rain does not appear and vanish over a block that size in five minutes, so a
+    pixel wet in one frame and dry in BOTH neighbours is not weather. This is
+    the same class of fix as clipping the 65-80 dBZ clutter tail before training
+    (archive.MAX_DBZ): removing non-meteorological echo, not tuning a forecast.
+
+    It discriminates rather than just deleting - measured as a share of wet
+    pixels removed:
+
+        genuine widespread rain (37% wet)    1.8%
+        moderate rain (11-20% wet)           3.9-5.4%
+        the flickering-sector case          70%
+
+    The first and last frames have only one neighbour, so they get the one-sided
+    test.
+
+    DISPLAY ONLY - do not put this in front of the forecast. That was tried and
+    scored: filtering the input stack cost 0.01000 CRPS over 20 clean archive
+    windows, twice the pre-registered floor, and was better on only 7 of 20. It
+    removes 5.6% of genuinely wet pixels on clean data, and STEPS would rather
+    have the noise than lose the echo. So `server.refresh` filters the frames it
+    DRAWS and hands `run_forecast` the untouched stack.
+    """
+    stack = np.asarray(stack, dtype=float)
+    wet = np.nan_to_num(stack) > thr
+    out = stack.copy()
+    n = len(stack)
+    for i in range(n):
+        if n == 1:
+            break
+        if i == 0:
+            lonely = wet[i] & ~wet[i + 1]
+        elif i == n - 1:
+            lonely = wet[i] & ~wet[i - 1]
+        else:
+            lonely = wet[i] & ~wet[i - 1] & ~wet[i + 1]
+        out[i][lonely] = 0.0
+    return out
+
+
+def _selfcheck_isolated():
+    """drop_time_isolated must delete a flickering block and spare steady rain."""
+    steady = np.zeros((5, 20, 20)); steady[:, 5:10, 5:10] = 2.0   # present throughout
+    flicker = np.zeros((5, 20, 20)); flicker[1, 12:18, 12:18] = 2.0  # one frame only
+    stack = steady + flicker
+    out = drop_time_isolated(stack)
+    assert np.allclose(out[:, 5:10, 5:10], 2.0), "steady rain must survive"
+    assert out[1, 12:18, 12:18].max() == 0.0, "a one-frame block must go"
+    # a block present in two consecutive frames is weather, not a dropout
+    two = np.zeros((5, 20, 20)); two[1:3, 12:18, 12:18] = 2.0
+    assert drop_time_isolated(two)[1:3, 12:18, 12:18].min() == 2.0, \
+        "two consecutive frames must survive"
+    # and it must not invent rain anywhere
+    assert (drop_time_isolated(stack) <= stack + 1e-9).all()
+    print("live self-check ok (temporal-isolation filter)")
+
+
 def crop_to_belgium(field, metadata):
     """Crop a full-Europe field to the Belgium bbox using the field's own
     projection (pixel grid isn't lat/lon, so this reprojects the bbox
@@ -233,6 +301,13 @@ def run_live_nowcast(n_lead=12, product="DBZH", n_frames=4):
 
 
 if __name__ == "__main__":
+    import sys
+
+    # --selfcheck needs no network, so it can run in CI and in the image.
+    if "--selfcheck" in sys.argv:
+        _selfcheck_isolated()
+        raise SystemExit
+
     t0 = time.time()
     forecast, metadata, timestamps = run_live_nowcast()
     print(f"Forecast shape: {forecast.shape} (lead steps, y, x)")

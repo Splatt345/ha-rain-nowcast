@@ -159,6 +159,14 @@ class Nowcaster:
         # point curves and the sensors read the unmasked fields.
         footprint = np.all(np.isfinite(np.asarray(forecast, dtype=float)), axis=0)
 
+        # A second display-only correction, for a different flicker. A
+        # contributing radar's rectangular sector drops in and out of the OPERA
+        # composite between timesteps, so a block of echo appeared and vanished
+        # frame to frame. Filtered for the picture only: putting it in front of
+        # run_forecast was scored and cost 0.01 CRPS, twice the floor (see
+        # live.drop_time_isolated), so STEPS still gets the untouched stack.
+        shown_past = live.drop_time_isolated(stack)
+
         def add(name, field, minutes, kind):
             field = np.where(footprint, field, np.nan)
             images[name] = render.png_bytes(render.resample(field, rows, cols))
@@ -169,7 +177,7 @@ class Nowcaster:
                 "time": (last_time + datetime.timedelta(minutes=minutes)).isoformat(),
             })
 
-        for i, field in enumerate(stack):
+        for i, field in enumerate(shown_past):
             add(f"p{i}", field, -interval * (len(stack) - 1 - i), "past")
         for k, field in enumerate(forecast, start=1):
             add(f"f{k}", field, interval * k, "forecast")

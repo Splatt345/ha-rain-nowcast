@@ -1,6 +1,8 @@
 """UI setup: ask where the add-on is, prove it answers, then create the entry."""
 from __future__ import annotations
 
+import logging
+
 import aiohttp
 import voluptuous as vol
 from homeassistant.config_entries import (
@@ -9,7 +11,42 @@ from homeassistant.core import callback
 from homeassistant.const import CONF_HOST, CONF_PORT
 from homeassistant.helpers.aiohttp_client import async_get_clientsession
 
-from .const import DEFAULT_HOST, DEFAULT_PORT, DOMAIN
+from .const import DEFAULT_HOST, DEFAULT_PORT, DOMAIN, HOST_CANDIDATES
+
+_LOGGER = logging.getLogger(__name__)
+
+
+async def probe(hass, host: str, port: int) -> bool:
+    """Does the add-on answer at this address?
+
+    A 503 counts as yes: the add-on is up but spends its first minute or two
+    downloading radar before it can forecast, and refusing the configuration for
+    that would be wrong.
+    """
+    session = async_get_clientsession(hass)
+    try:
+        async with session.get(f"http://{host}:{port}/api/metrics",
+                               timeout=aiohttp.ClientTimeout(total=10)) as resp:
+            return resp.status in (200, 503)
+    except (aiohttp.ClientError, TimeoutError):
+        return False
+
+
+async def find_addon(hass, typed: str, port: int) -> str | None:
+    """The address the add-on actually answers on, or None.
+
+    Tries what the user typed first, then the known Supervisor naming variants.
+    The Supervisor has used more than one over time and the right one is not
+    discoverable from inside Home Assistant, so probing beats guessing: the
+    failure mode of a wrong guess is an integration that cannot connect and
+    cannot say why.
+    """
+    for host in (typed, *(h for h in HOST_CANDIDATES if h != typed)):
+        if await probe(hass, host, port):
+            if host != typed:
+                _LOGGER.info("Rain Nowcast add-on found at %s, not %s", host, typed)
+            return host
+    return None
 
 
 class RainNowcastConfigFlow(ConfigFlow, domain=DOMAIN):
@@ -23,17 +60,17 @@ class RainNowcastConfigFlow(ConfigFlow, domain=DOMAIN):
     async def async_step_user(self, user_input=None) -> ConfigFlowResult:
         errors = {}
         if user_input is not None:
-            host, port = user_input[CONF_HOST], user_input[CONF_PORT]
-            # One instance per add-on, and re-adding the same one should say so
-            # rather than duplicating all eight entities.
-            await self.async_set_unique_id(f"{host}:{port}")
-            self._abort_if_unique_id_configured()
-
-            error = await self._probe(host, port)
-            if error is None:
+            port = user_input[CONF_PORT]
+            host = await find_addon(self.hass, user_input[CONF_HOST], port)
+            if host is None:
+                errors["base"] = "cannot_connect"
+            else:
+                # One instance per add-on, and re-adding the same one should say
+                # so rather than duplicating all eight entities.
+                await self.async_set_unique_id(f"{host}:{port}")
+                self._abort_if_unique_id_configured()
                 return self.async_create_entry(title="Rain Nowcast",
                                                data={CONF_HOST: host, CONF_PORT: port})
-            errors["base"] = error
 
         return self.async_show_form(
             step_id="user", errors=errors,
@@ -43,22 +80,7 @@ class RainNowcastConfigFlow(ConfigFlow, domain=DOMAIN):
             }),
         )
 
-    async def _probe(self, host: str, port: int) -> str | None:
-        """Check the add-on answers before accepting the entry.
 
-        A 503 means it is running but has not finished its first forecast -
-        which is normal for the first minute or two and NOT a reason to reject
-        the configuration, so it is accepted.
-        """
-        session = async_get_clientsession(self.hass)
-        try:
-            async with session.get(f"http://{host}:{port}/api/metrics",
-                                   timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                if resp.status in (200, 503):
-                    return None
-                return "cannot_connect"
-        except (aiohttp.ClientError, TimeoutError):
-            return "cannot_connect"
 
 
 class RainNowcastOptionsFlow(OptionsFlow):
@@ -74,15 +96,10 @@ class RainNowcastOptionsFlow(OptionsFlow):
         current = {**self.config_entry.data, **self.config_entry.options}
 
         if user_input is not None:
-            session = async_get_clientsession(self.hass)
-            host, port = user_input[CONF_HOST], user_input[CONF_PORT]
-            try:
-                async with session.get(f"http://{host}:{port}/api/metrics",
-                                       timeout=aiohttp.ClientTimeout(total=15)) as resp:
-                    ok = resp.status in (200, 503)
-            except (aiohttp.ClientError, TimeoutError):
-                ok = False
-            if ok:
+            port = user_input[CONF_PORT]
+            host = await find_addon(self.hass, user_input[CONF_HOST], port)
+            if host is not None:
+                user_input = {CONF_HOST: host, CONF_PORT: port}
                 # Written to data, not options, so the coordinator reads one
                 # place; reloading picks the new address up immediately.
                 self.hass.config_entries.async_update_entry(

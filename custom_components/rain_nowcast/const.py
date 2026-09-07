@@ -10,7 +10,21 @@ from homeassistant.components.sensor import SensorDeviceClass, SensorStateClass
 from homeassistant.const import PERCENTAGE, UnitOfLength, UnitOfTime
 
 DOMAIN = "rain_nowcast"
-DEFAULT_HOST = "local_rain_nowcast"   # add-on slug on the Supervisor network
+#: The Supervisor names an add-on's container from its slug, and the exact form
+#: has varied: dashes or underscores, with or without the repository prefix, and
+#: the "local" prefix only for a locally-installed add-on. Guessing wrong means
+#: the integration simply cannot connect, with nothing to tell the user which
+#: name to try - so instead of guessing once, the config flow probes this list
+#: and keeps whichever answers.
+DEFAULT_HOST = "local-rain-nowcast"
+HOST_CANDIDATES = (
+    "local-rain-nowcast",
+    "local_rain_nowcast",
+    "addon_local_rain_nowcast",
+    "rain-nowcast",
+    "rain_nowcast",
+    "local-rain-nowcast.local.hass.io",
+)
 DEFAULT_PORT = 8061
 DEFAULT_SCAN_INTERVAL = 60            # the add-on itself only rebuilds every 5 min
 

@@ -142,7 +142,25 @@ class Nowcaster:
 
         images, frames = {}, []
 
+        # ONE FOOTPRINT FOR THE WHOLE ANIMATION.
+        #
+        # STEPS advects the field, so pixels that would have blown in from
+        # outside the domain have nothing to come from and end up NaN. That band
+        # sits on the upwind edge and GROWS with lead time - measured 1.55% of
+        # the domain at +5 min to 8.62% at +60 - while the observed frames are
+        # 100% covered. Drawn frame by frame, a chunk of rain therefore faded
+        # out as the loop ran forward and snapped back when it wrapped round to
+        # the past frames, which reads as the radar glitching.
+        #
+        # So every frame is drawn through the SAME mask: the pixels that are
+        # valid at every lead. The cost is hiding a sliver of real observation
+        # at the edge; the gain is that the map stops inventing an event that is
+        # an artefact of the forecast's own geometry. It is display-only - the
+        # point curves and the sensors read the unmasked fields.
+        footprint = np.all(np.isfinite(np.asarray(forecast, dtype=float)), axis=0)
+
         def add(name, field, minutes, kind):
+            field = np.where(footprint, field, np.nan)
             images[name] = render.png_bytes(render.resample(field, rows, cols))
             frames.append({
                 "name": name,

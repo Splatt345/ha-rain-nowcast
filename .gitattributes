@@ -3,4 +3,5 @@
 # normalise them, so the file in a fresh clone would no longer match the
 # upstream release it was verified against.
 rain-nowcast/web/vendor/** -text
+custom_components/rain_nowcast/www/leaflet.* -text
 rain-nowcast/models/*.onnx binary

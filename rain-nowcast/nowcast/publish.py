@@ -77,6 +77,27 @@ def metrics(state):
     }
 
 
+def payload(state):
+    """(metrics, attributes) - everything a Home Assistant entity needs.
+
+    Split out of Publisher.publish so the MQTT path, the REST path and the
+    /api/metrics endpoint the custom integration polls all derive their values
+    HERE, exactly once. Two consumers computing "minutes until rain" from the
+    same series independently is how they end up disagreeing.
+    """
+    return metrics(state), {
+        # The whole per-minute curve rides along as attributes, so a template
+        # sensor or custom card can use it without re-deriving anything.
+        "forecast_minutes": state["series"]["minutes"],
+        "forecast_values": state["series"]["values"],
+        "forecast_probability": state["series"].get("probability"),
+        "forecast_low": state["series"].get("p10"),
+        "forecast_high": state["series"].get("p90"),
+        "latitude": state["location"][0],
+        "longitude": state["location"][1],
+    }
+
+
 class Publisher:
     """Publishes to MQTT if a broker is reachable, else to the core REST API."""
 
@@ -221,18 +242,7 @@ class Publisher:
     def publish(self, state):
         if self.mode == "off":
             return
-        data = metrics(state)
-        # The whole per-minute curve rides along as attributes, so a template
-        # sensor or custom card can use it without re-deriving anything.
-        attrs = {
-            "forecast_minutes": state["series"]["minutes"],
-            "forecast_values": state["series"]["values"],
-            "forecast_probability": state["series"].get("probability"),
-            "forecast_low": state["series"].get("p10"),
-            "forecast_high": state["series"].get("p90"),
-            "latitude": state["location"][0],
-            "longitude": state["location"][1],
-        }
+        data, attrs = payload(state)
         if self.mode == "mqtt":
             self.client.publish(STATE_TOPIC, json.dumps({**data, **attrs}), retain=True)
         else:

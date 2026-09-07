@@ -76,6 +76,14 @@ the right ones for "how hard". The shaded band along the bottom of the chart is
 the same number, minute by minute — full height means all twelve runs agree it
 rains then.
 
+### No MQTT broker? Use the integration instead
+
+The repository ships a custom integration (`custom_components/rain_nowcast`)
+that polls this add-on over HTTP and creates the same eight entities with no
+broker at all. Copy it to `/config/custom_components/`, restart Home Assistant,
+add **Rain Nowcast** under Devices & Services, and set `publish_sensors: false`
+here so the entities are not created twice.
+
 They are published over MQTT discovery when a broker is configured — the
 add-on asks the Supervisor for it, so there is nothing to fill in — which
 gives proper registry entities you can rename and group. Without a broker it

@@ -391,6 +391,20 @@ class Handler(BaseHTTPRequestHandler):
         if path == "api/state":
             body = json.dumps(self.nowcaster.snapshot()).encode()
             return self._send(200, body, "application/json")
+        # What the custom integration polls. Same numbers the MQTT sensors
+        # carry, from the same publish.payload() call, so the two can never
+        # drift apart.
+        if path == "api/metrics":
+            snap = self.nowcaster.snapshot()
+            if snap.get("status") != "ok":
+                return self._send(503, b'{"error":"no forecast yet"}',
+                                  "application/json")
+            from nowcast.publish import payload
+
+            data, attrs = payload(snap)
+            body = json.dumps({**data, "attributes": attrs,
+                               "updated": snap["updated"]}).encode()
+            return self._send(200, body, "application/json")
         if path == "api/point":
             # Move the marker without re-running the forecast. Validated here
             # rather than trusted: these are query params off a public ingress

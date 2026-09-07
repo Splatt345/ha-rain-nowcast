@@ -82,6 +82,30 @@ The panel is then at `http://<host>:8099` directly, rather than behind ingress.
 
 ---
 
+## Optional: skip MQTT entirely
+
+The add-on publishes sensors over MQTT discovery, which needs a broker. If you
+would rather not run one, this repo also ships a **custom integration** that
+polls the add-on over HTTP and creates the same eight entities natively.
+
+1. Copy `custom_components/rain_nowcast` to your Home Assistant `/config/custom_components/`.
+2. Restart Home Assistant.
+3. **Settings → Devices & Services → Add Integration → Rain Nowcast**. On HA OS
+   the default host `local_rain_nowcast` port `8099` is already right; elsewhere
+   give the host running the add-on.
+4. Set **`publish_sensors: false`** in the add-on, or you will get two copies of
+   every entity and Home Assistant will suffix the second set with `_2`.
+
+The entities are identical in name, unit and device class to the MQTT ones, so
+automations written against either keep working. They are proper registry
+entities: verified to survive a Home Assistant restart, and to go `unavailable`
+rather than stale when the add-on stops.
+
+> The add-on's third path - the Supervisor REST API, used automatically when
+> there is no broker - needs no setup at all, but Home Assistant treats the
+> states it creates as ephemeral: **they disappear on every restart** until the
+> next radar frame. That is the limitation this integration removes.
+
 ## After installing
 
 Set **`latitude`/`longitude`** to the spot you care about, paste the
@@ -150,6 +174,7 @@ rain-nowcast/
   DOCS.md                               user-facing docs
   models/smaat.onnx                     trained SmaAt-UNet, exported for serving
   web/index.html  web/vendor/           the UI (Leaflet map + canvas chart)
+custom_components/rain_nowcast/          optional integration: same entities, no broker
   nowcast/
     server.py       background refresh loop + HTTP server
     publish.py      Home Assistant entities, over MQTT or the core REST API

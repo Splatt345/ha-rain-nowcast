@@ -1,0 +1,6 @@
+# Vendored third-party assets and the trained model must survive a clone
+# byte-for-byte. leaflet.css ships with CRLF endings and git would silently
+# normalise them, so the file in a fresh clone would no longer match the
+# upstream release it was verified against.
+rain-nowcast/web/vendor/** -text
+rain-nowcast/models/*.onnx binary

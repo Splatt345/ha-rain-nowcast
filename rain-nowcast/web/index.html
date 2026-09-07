@@ -4,9 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Rain Nowcast</title>
-<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
-      integrity="sha384-sHL9NAb7lN7rfvG5lfHpm643Xkcjzp4jFvuavGOndn6pjVqS6ny56CAt3nsEVT4H"
-      crossorigin="anonymous">
+<!-- Leaflet is vendored, not pulled from a CDN. The add-on is often on a
+     network that blocks outbound traffic beyond the radar API, and a blocked
+     unpkg meant a blank map rather than a degraded one. These files are
+     byte-identical to leaflet@1.9.4 - verified against the SRI hashes this
+     page used to carry. -->
+<link rel="stylesheet" href="./vendor/leaflet.css">
 <style>
   :root {
     --bg: #f4f6f9;
@@ -155,9 +158,7 @@
   </div>
 </div>
 
-<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
-        integrity="sha384-cxOPjt7s7Iz04uaHJceBmS+qpjv2JkIHNVcuOrM+YHwZOmJGBXI00mdUXEq65HTH"
-        crossorigin="anonymous"></script>
+<script src="./vendor/leaflet.js"></script>
 <script>
 const dark = matchMedia('(prefers-color-scheme: dark)').matches;
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();

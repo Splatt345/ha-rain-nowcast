@@ -411,6 +411,15 @@ class Handler(BaseHTTPRequestHandler):
                 return self._send(503, b'{"error":"no forecast yet"}',
                                   "application/json")
             return self._send(200, json.dumps(point).encode(), "application/json")
+        # Leaflet, served from the image rather than a CDN so the panel works
+        # on a network that only allows the radar API out. Whitelisted by exact
+        # name: this is a public ingress route and must not become a way to read
+        # arbitrary files out of the container.
+        if path in ("vendor/leaflet.js", "vendor/leaflet.css"):
+            ctype = ("application/javascript" if path.endswith(".js")
+                     else "text/css") + "; charset=utf-8"
+            with open(os.path.join(WEB_DIR, "vendor", os.path.basename(path)), "rb") as f:
+                return self._send(200, f.read(), ctype, cache="max-age=86400")
         if path.startswith("frames/") and path.endswith(".png"):
             image = self.nowcaster.image(path[len("frames/"):-len(".png")])
             if image is not None:

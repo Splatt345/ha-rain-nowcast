@@ -6,12 +6,23 @@ re-serving of somebody else's API.
 
 ## Installation
 
-1. Settings → Add-ons → Add-on store → ⋮ → **Repositories**, add this repo.
-2. Install **Rain Nowcast**, set your latitude/longitude and API key, start it.
-3. Open it from the sidebar (the panel is added automatically).
+**This add-on is amd64 only.** A Raspberry Pi cannot run it — `aarch64` is not
+built, so the add-on will not appear in your store at all on one. That is
+deliberate: the architecture used to be advertised and then fail at install
+with nothing explaining why.
 
-First start takes a minute or two: it downloads an hour of radar (~35 MB)
-before it can forecast anything.
+Either copy the `rain-nowcast` folder to the `/addons` share (via the *Samba
+share* or *Advanced SSH & Web Terminal* add-on) and use
+**Settings → Add-ons → Add-on Store → ⋮ → Check for updates**, where it appears
+under **Local add-ons** — or add the repository under
+**⋮ → Repositories** if you have pushed it somewhere reachable.
+
+Then install **Rain Nowcast**, set your latitude/longitude and API key, and
+start it. The panel is added to the sidebar automatically.
+
+The first build compiles pysteps from source and takes several minutes. The
+first start then downloads an hour of radar (~35 MB) before it can forecast
+anything. Budget ~1.1 GB of disk and 0.5-0.7 GB of RAM.
 
 ## Getting an API key
 
@@ -28,8 +39,12 @@ with GitHub/Google/Azure AD, no approval wait) and paste it into `api_key`.
 | `api_key` | – | MeteoGate ORD API key. |
 | `history_minutes` | 60 | How much radar history to show and feed the nowcast. |
 | `forecast_minutes` | 60 | How far ahead to forecast. Skill is largely gone past ~35 min. |
-| `ensemble_members` | 12 | STEPS ensemble size. Lower it to 4–6 on a Raspberry Pi; a full cycle takes ~12 s on a desktop CPU. |
+| `ensemble_members` | 12 | STEPS ensemble size. A full cycle takes ~12 s on a desktop CPU; lower it to 4–6 on a slow machine, at the cost of a coarser `rain_chance` (it can only report in steps of 1/N). |
 | `publish_sensors` | true | Publish the forecast as Home Assistant entities. |
+| `use_model` | true | Combine the STEPS ensemble with the bundled SmaAt-UNet neural network. Adds ~0.25 s per cycle. Turn it off for plain STEPS. |
+| `mqtt_host` | – | **Leave empty on Home Assistant OS/Supervised** — the Supervisor supplies the broker. Only needed on Home Assistant Container or docker-compose, where there is no Supervisor and sensors would otherwise not publish at all. |
+| `mqtt_port` | 1883 | With `mqtt_host`. |
+| `mqtt_username` / `mqtt_password` | – | With `mqtt_host`, if your broker needs them. |
 
 ## Sensors
 

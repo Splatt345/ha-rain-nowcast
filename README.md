@@ -8,45 +8,138 @@ figuring out *which* nowcasting method actually works and measuring how well.
 This repo is that method packaged as something you can click on.
 
 - **Radar view** — the last hour of real radar, animated, on a real map, plus
-  the next hour extrapolated forward. Scrub or let it loop.
+  the next hour extrapolated forward. Scrub or let it loop, pick a colour
+  scheme, and click anywhere on the map to forecast that spot instead.
 - **Rain graph** — rain rate at your exact location, per minute, past hour
   through next hour, with a plain-language summary ("Rain starting in 25 min,
-  up to 3.4 mm/h").
-- **Sensors** — seven entities (is it raining, minutes until rain, peak rate,
-  expected total…) so automations can act before the rain lands.
+  up to 3.4 mm/h") and a band showing how much the forecast runs disagree.
+- **Sensors** — eight entities (is it raining, minutes until rain, chance of
+  rain, peak rate, expected total…) so automations can act before rain lands.
 
-Install and configuration: [`rain-nowcast/DOCS.md`](rain-nowcast/DOCS.md).
+---
+
+## Before you install
+
+**Check two things, or it will not work.**
+
+1. **Your Home Assistant machine must be x86-64 (amd64).** A Raspberry Pi will
+   not work — `aarch64` is not built. The add-on simply will not appear in the
+   store on an unsupported machine, which is deliberate: it used to be
+   advertised and then fail at install time with nothing explaining why.
+2. **You need a free API key.** The radar is EUMETNET's OPERA composite via the
+   MeteoGate Open Radar Data API, and anonymous access is rate-limited to the
+   point of being useless for a 5-minute poll. Register at
+   <https://meteogate.eu/> (sign in with GitHub/Google/Azure AD, no approval
+   wait) and keep the key for the `api_key` option.
+
+Budget roughly **1.1 GB of disk** for the image and **0.5–0.7 GB of RAM** while
+running.
+
+---
+
+## Install
+
+### A. Home Assistant OS or Supervised — as a local add-on
+
+No GitHub account needed, and this is the working path today. Get the
+`rain-nowcast` folder onto the Home Assistant machine's `/addons` share — the
+*Samba share* or *Advanced SSH & Web Terminal* add-ons both expose it — so that
+`/addons/rain-nowcast/config.yaml` exists.
+
+Then **Settings → Add-ons → Add-on Store → ⋮ → Check for updates**, and Rain
+Nowcast appears under **Local add-ons**. Click it and **Install**. The first
+build compiles pysteps from source and takes several minutes.
+
+### B. Home Assistant OS or Supervised — from a Git repository
+
+Push this repository somewhere Home Assistant can reach, then **Settings →
+Add-ons → Add-on Store → ⋮ → Repositories**, paste the URL, and install Rain
+Nowcast from the section that appears.
+
+> This repository has no remote configured yet, so option A is the one that
+> works right now. `git remote add origin …` and push first for option B.
+
+### C. Home Assistant Container or docker-compose — no Supervisor
+
+No add-on store here, so run the container directly. **You must set
+`MQTT_HOST`**: with no Supervisor there is nothing to ask for the broker, and
+the sensors would otherwise silently not publish.
+
+```bash
+docker build -t rain-nowcast rain-nowcast/
+
+docker run -d --name rain-nowcast \
+  -p 8099:8099 \
+  -e ORD_API_KEY=your_meteogate_key \
+  -e LATITUDE=50.85 -e LONGITUDE=4.35 \
+  -e MQTT_HOST=192.168.1.10 -e MQTT_PORT=1883 \
+  -e MQTT_USERNAME=homeassistant -e MQTT_PASSWORD=secret \
+  -v rain_nowcast_data:/data \
+  rain-nowcast
+```
+
+The panel is then at `http://<host>:8099` directly, rather than behind ingress.
+
+---
+
+## After installing
+
+Set **`latitude`/`longitude`** to the spot you care about, paste the
+**`api_key`**, and start it. The first run downloads an hour of radar (~35 MB)
+before it can forecast anything, so give it a minute or two.
+
+Sensors arrive over **MQTT discovery** and group under one *Rain Nowcast*
+device. They survive a Home Assistant restart without waiting for the next
+radar frame. With no broker at all, install the *Mosquitto broker* add-on
+first — on HA OS the Supervisor then wires it up with nothing to configure.
+
+Every option, all eight entities, an example automation and the honest limits of
+the forecast are in [`rain-nowcast/DOCS.md`](rain-nowcast/DOCS.md), which is
+also the add-on's Documentation tab.
+
+---
 
 ## What's behind it
 
-`pysteps` STEPS: optical-flow radar extrapolation with a stochastic ensemble.
-No AI, no GPU, no cloud service — it runs on the Home Assistant box in about
-12 seconds per cycle. Global AI weather models (GraphCast, Pangu-Weather,
-Google WeatherNext) are the wrong tool here: 6h+ timesteps on 25–100 km grids.
-DeepMind's DGMR is the right *class* of model, but the only public checkpoint
-produces physically impossible output (rain rates over 3000 mm/h) and lost
-badly to pysteps in a head-to-head backtest — 0.055 CSI against 0.52.
+`pysteps` **STEPS**: optical-flow radar extrapolation with a 12-member
+stochastic ensemble. The ensemble is the point — it is what `rain_chance` and
+the uncertainty band are made of, and a single averaged field cannot produce
+either.
 
-Radar comes from EUMETNET's OPERA composite via the MeteoGate API, at 5-minute
-cadence — the same cadence the accuracy numbers were validated at.
+Since v1.1 that ensemble is shifted toward a **SmaAt-UNet** neural network
+(4.02 M parameters) trained here on 149 days of 5-minute 1 km OPERA radar. It is
+combined rather than substituted, because head-to-head the network produces the
+better single field but *loses* on CRPS — it is deterministic, and this add-on
+serves a probability. Combining gained **+0.0167 CRPS on 25 of 30 validation
+windows** against a pre-registered floor of 0.005. Inference runs on the CPU
+through ONNX Runtime in about 0.25 s; no GPU, no cloud service.
+
+Global AI weather models (GraphCast, Pangu-Weather, WeatherNext) are the wrong
+tool here: 6h+ timesteps on 25–100 km grids. DeepMind's DGMR is the right
+*class* of model, but the only public checkpoint produces physically impossible
+output (over 3000 mm/h) and lost badly to pysteps head-to-head — 0.055 CSI
+against 0.52.
 
 ## Accuracy
 
-| lead | CSI@1mm/h | RMSE (mm/h) |
-|--------|-----------|-------------|
-| 5 min | 0.74 | 0.65 |
-| 30 min | 0.40 | 0.89 |
-| 60 min | 0.18 | 0.87 |
-| mean (held-out) | 0.35 | 0.74 |
+Measured on **20 independent Belgian events** (2021–2024, KNMI 1 km 5-minute
+composites), scored only on the 10 never used for tuning:
 
-Useful skill runs to roughly 30–35 minutes, then degrades gracefully. That
-matches published STEPS validation for European radar (Pulkkinen et al. 2019),
-so it is representative rather than a lucky event. Extrapolation cannot
-predict storm genesis or decay — only advect what already exists.
+| lead | 5 min | 15 min | 30 min | 45 min | 60 min |
+|---|---|---|---|---|---|
+| CSI@1mm/h | 0.72 | 0.55 | 0.41 | 0.31 | 0.25 |
 
-Two attempts to push past this were made and honestly failed to clear the bar:
-a guarded hyperparameter search (0.397 → 0.403 CSI, essentially noise) and
-NWP blending via `pysteps.blending.steps` (+0.002 CSI, 13% worse RMSE).
+Held-out mean **0.404**. In plain terms: **the first half hour is genuinely
+useful, the second half hour is a hint.** That decay is the physical limit of
+extrapolation, not an implementation flaw — it moves existing rain correctly
+but cannot invent showers that have not formed yet.
+
+It does not cry wolf: on 10 near-dry events it predicted wet pixels 23× *less*
+often than they actually occurred. The failure mode is being too cautious.
+
+Two limits worth knowing before automating on it, both measured and both
+detailed in DOCS.md: `rain_chance` over-promises above about 40%, and at 5 mm/h
+the forecast has essentially no skill at telling heavy rain from light.
 
 ## Layout
 
@@ -55,14 +148,16 @@ repository.yaml            Home Assistant add-on repository manifest
 rain-nowcast/
   config.yaml  build.yaml  Dockerfile   add-on packaging
   DOCS.md                               user-facing docs
-  web/index.html                        the UI (Leaflet map + canvas chart)
+  models/smaat.onnx                     trained SmaAt-UNet, exported for serving
+  web/index.html  web/vendor/           the UI (Leaflet map + canvas chart)
   nowcast/
     server.py       background refresh loop + HTTP server
     publish.py      Home Assistant entities, over MQTT or the core REST API
     render.py       radar field -> Web-Mercator PNG overlay, point series
     live.py         fetch OPERA composites, crop to Belgium
+    mlmodel.py      SmaAt-UNet inference via ONNX Runtime
+    combine.py      spread-preserving combination of the two forecasts
     backtest.py     the shared STEPS core, plus offline scoring
-    optimize.py     the guarded hyperparameter search
 ```
 
 ## Development
@@ -75,4 +170,10 @@ ORD_API_KEY=... LATITUDE=50.85 LONGITUDE=4.35 ../.venv/bin/python -m nowcast.ser
 # http://localhost:8099
 ```
 
-`python -m nowcast.render` runs the rendering self-check.
+Every module carries its own self-check, and they need no network:
+
+```bash
+for m in render publish interpolate combine mlmodel server; do
+  python -m nowcast.$m --selfcheck
+done
+```

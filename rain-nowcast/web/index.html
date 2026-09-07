@@ -50,6 +50,15 @@
   }
 
   #map { height: 420px; background: var(--bg); }
+  /* Mute the basemap so the rain reads as the subject rather than competing
+     with road and landuse colours. Applied to the tile pane only, so the
+     radar overlay, the marker and the controls keep their real colours. */
+  #map .leaflet-tile-pane { filter: grayscale(0.85) brightness(1.06) contrast(0.92); }
+  @media (prefers-color-scheme: dark) {
+    /* invert gives a dark basemap from the same light tiles; the second
+       hue-rotate puts the few surviving hues back the right way round. */
+    #map .leaflet-tile-pane { filter: grayscale(0.9) invert(0.92) hue-rotate(180deg) brightness(0.95); }
+  }
   @media (max-width: 560px) { #map { height: 320px; } }
   .leaflet-container { font: inherit; background: var(--bg); }
 
@@ -164,10 +173,17 @@ const dark = matchMedia('(prefers-color-scheme: dark)').matches;
 const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
 
 const map = L.map('map', { zoomControl: true, attributionControl: true });
-L.tileLayer(
-  `https://{s}.basemaps.cartocdn.com/${dark ? 'dark_all' : 'light_all'}/{z}/{x}/{y}{r}.png`,
-  { maxZoom: 12, minZoom: 5, attribution: '&copy; OpenStreetMap, &copy; CARTO | radar: EUMETNET OPERA' }
-).addTo(map);
+// Plain OpenStreetMap tiles: no API key, no account, no third party beyond OSM
+// itself. The CARTO light_all/dark_all basemaps this replaces are prettier and
+// already muted, but they are a commercial service whose free use is not
+// guaranteed. OSM's own tiles are muted here in CSS instead (see #map .leaflet-
+// tile-pane), which costs nothing and keeps the radar the brightest thing on
+// screen. maxZoom is capped at 12 because the radar is 1 km data - zooming
+// past that magnifies pixels rather than revealing anything.
+L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', {
+  maxZoom: 12, minZoom: 5,
+  attribution: '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors | radar: EUMETNET OPERA'
+}).addTo(map);
 map.setView([50.85, 4.35], 7);
 map.on('click', e => { if (state) setLocation(e.latlng.lat, e.latlng.lng); });
 

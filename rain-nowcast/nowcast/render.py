@@ -150,12 +150,37 @@ def mercator_sampler(metadata, bbox, width=640):
     return rows, cols, height
 
 
-def resample(field, rows, cols):
-    from scipy.ndimage import map_coordinates
+#: Display-only smoothing, in SOURCE pixels, applied before the Mercator
+#: resample. Tied to the source grid rather than to a distance in km, because
+#: what it exists to hide is an artefact of that grid.
+#:
+#: The OPERA composite is assembled from national radars of differing
+#: resolution, and coarser contributors are filled into the 1 km grid as flat
+#: 2-4 km blocks. Zoomed in, the overlay showed hard square steps and stair-
+#: stepped edges - visibly wrong, and not something the forecast believes.
+#:
+#: Higher-order interpolation does NOT fix it: order=3 was rendered and compared
+#: side by side with order=1 and looks the same, because interpolating blocky
+#: data smoothly still yields blocky data. Only actual smoothing removes it, at
+#: roughly the source pixel scale - which is another way of saying "do not draw
+#: detail finer than the data resolves".
+SMOOTH_PX = 0.8
 
-    return map_coordinates(
-        np.nan_to_num(field, nan=0.0), [rows, cols], order=1, mode="constant", cval=0.0
-    )
+
+def resample(field, rows, cols, smooth=SMOOTH_PX):
+    """Resample a field onto the Mercator grid for display.
+
+    DISPLAY ONLY. This is the overlay path and nothing else calls it: the
+    sensors, the per-minute curve and the uncertainty fan all come from
+    `server._point_state`, which reads the unsmoothed forecast. So this changes
+    what the map looks like and cannot change what the add-on predicts.
+    """
+    from scipy.ndimage import gaussian_filter, map_coordinates
+
+    field = np.nan_to_num(field, nan=0.0)
+    if smooth:
+        field = gaussian_filter(field, smooth)
+    return map_coordinates(field, [rows, cols], order=1, mode="constant", cval=0.0)
 
 
 def point_rowcol(metadata, lat, lon):
@@ -205,6 +230,22 @@ def _demo():
         assert table.shape == (256, 3) and table.dtype == np.uint8, name
         assert tuple(table[255]) != tuple(table[0]), f"{name} is flat"
     assert not np.array_equal(tables["viridis"], tables["blue-green"])
+
+    # Display smoothing must soften block edges WITHOUT moving the rain or
+    # inventing coverage - it is a presentation change and has to stay one.
+    rng = np.random.default_rng(1)
+    blocky = np.repeat(np.repeat(rng.random((16, 16)) * 20, 4, axis=0), 4, axis=1)
+    ident = np.arange(64.0)
+    idx = np.meshgrid(ident, ident, indexing="ij")
+    raw = resample(blocky, idx[0], idx[1], smooth=0)
+    soft = resample(blocky, idx[0], idx[1], smooth=SMOOTH_PX)
+    jump = lambda a: np.abs(np.diff(a, axis=1)).max()
+    assert jump(soft) < jump(raw), "smoothing must reduce the worst block edge"
+    assert abs(soft.mean() - raw.mean()) < 0.05, "must not change how much rain there is"
+    peak = lambda a: np.unravel_index(np.argmax(a), a.shape)
+    assert np.hypot(*(np.array(peak(soft)) - np.array(peak(raw)))) <= 4, \
+        "must not move the peak"
+    assert (soft >= 0).all()
 
     blob = png_bytes(np.random.default_rng(0).random((64, 64)) * 20)
     assert blob[:8] == b"\x89PNG\r\n\x1a\n"

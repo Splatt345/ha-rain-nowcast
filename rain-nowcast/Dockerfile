@@ -1,10 +1,22 @@
-ARG BUILD_FROM=python:3.12-slim-bookworm
-
+# THE BASE IMAGE IS FIXED, AND DELIBERATELY NOT `ARG BUILD_FROM`.
+#
+# The Supervisor passes --build-arg BUILD_FROM=ghcr.io/home-assistant/base:latest
+# on every build. That base is Alpine/musl, and this add-on cannot run on it:
+# opencv-python-headless and onnxruntime publish no musl wheels, so pip would
+# fall back to building OpenCV and ONNX Runtime from source inside the add-on
+# build. Declaring `ARG BUILD_FROM` let that value win over the default and the
+# build died on `apt-get: not found`.
+#
+# Not declaring the ARG makes the Supervisor's value an unused build arg - a
+# warning, not an error - and the base stays Debian whatever it passes. This is
+# also why there is no build.yaml: the Supervisor rejected its `build_from`
+# ("does not match regular expression", because a bare `python:3.12-slim` has no
+# namespace/ prefix) and then told us build.yaml is deprecated anyway.
+#
 # pysteps publishes no wheel for this Python, so its Cython extensions
 # (_proesmans, _vet) get compiled from source. That needs a toolchain, which
 # has no business being in the shipped image - hence the separate build stage.
-# hadolint ignore=DL3006
-FROM ${BUILD_FROM} AS builder
+FROM python:3.12-slim-bookworm AS builder
 # hadolint ignore=DL3008
 RUN apt-get update \
     && apt-get install -y --no-install-recommends gcc libc6-dev \
@@ -31,8 +43,7 @@ RUN pip install --no-cache-dir --prefix=/install -r /tmp/requirements.txt
 # The real saving on this image was the dependency choice, not pruning:
 # onnxruntime instead of PyTorch took it from 2.06 GB to 1.08 GB.
 
-# hadolint ignore=DL3006
-FROM ${BUILD_FROM}
+FROM python:3.12-slim-bookworm
 
 # libgomp is the one runtime piece the compiled bits need (built with -fopenmp).
 # hadolint ignore=DL3008

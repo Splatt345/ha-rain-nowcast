@@ -5,7 +5,7 @@ slug: rain_nowcast
 description: Live rain radar and a 60-minute minute-by-minute rain forecast
 url: https://github.com/efernet/ha-rain-nowcast
 ingress: true
-ingress_port: 8099
+ingress_port: 8061
 panel_icon: mdi:weather-pouring
 panel_title: Rain
 # amd64 only, deliberately. aarch64 was advertised but never shipped, so a Pi

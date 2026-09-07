@@ -21,7 +21,7 @@ from nowcast.backtest import BASELINE_CONFIG, run_forecast
 from nowcast.publish import Publisher
 
 WEB_DIR = os.path.join(os.path.dirname(__file__), "..", "web")
-PORT = int(os.environ.get("PORT", "8099"))
+PORT = int(os.environ.get("PORT", "8061"))
 POLL_SECONDS = 120  # how often we check for a new frame (cheap: one list call)
 RAIN_THRESHOLD = 0.1  # mm/h; below this, call it dry
 CACHE_KEEP_MINUTES = 180

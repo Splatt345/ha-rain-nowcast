@@ -69,7 +69,7 @@ the sensors would otherwise silently not publish.
 docker build -t rain-nowcast rain-nowcast/
 
 docker run -d --name rain-nowcast \
-  -p 8099:8099 \
+  -p 8061:8061 \
   -e ORD_API_KEY=your_meteogate_key \
   -e LATITUDE=50.85 -e LONGITUDE=4.35 \
   -e MQTT_HOST=192.168.1.10 -e MQTT_PORT=1883 \
@@ -78,7 +78,7 @@ docker run -d --name rain-nowcast \
   rain-nowcast
 ```
 
-The panel is then at `http://<host>:8099` directly, rather than behind ingress.
+The panel is then at `http://<host>:8061` directly, rather than behind ingress.
 
 ---
 
@@ -91,7 +91,7 @@ polls the add-on over HTTP and creates the same eight entities natively.
 1. Copy `custom_components/rain_nowcast` to your Home Assistant `/config/custom_components/`.
 2. Restart Home Assistant.
 3. **Settings → Devices & Services → Add Integration → Rain Nowcast**. On HA OS
-   the default host `local_rain_nowcast` port `8099` is already right; elsewhere
+   the default host `local_rain_nowcast` port `8061` is already right; elsewhere
    give the host running the add-on.
 4. Set **`publish_sensors: false`** in the add-on, or you will get two copies of
    every entity and Home Assistant will suffix the second set with `_2`.
@@ -192,7 +192,7 @@ python3 -m venv .venv
 .venv/bin/pip install -r rain-nowcast/requirements.txt
 cd rain-nowcast
 ORD_API_KEY=... LATITUDE=50.85 LONGITUDE=4.35 ../.venv/bin/python -m nowcast.server
-# http://localhost:8099
+# http://localhost:8061
 ```
 
 Every module carries its own self-check, and they need no network:

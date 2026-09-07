@@ -11,7 +11,7 @@ from homeassistant.const import PERCENTAGE, UnitOfLength, UnitOfTime
 
 DOMAIN = "rain_nowcast"
 DEFAULT_HOST = "local_rain_nowcast"   # add-on slug on the Supervisor network
-DEFAULT_PORT = 8099
+DEFAULT_PORT = 8061
 DEFAULT_SCAN_INTERVAL = 60            # the add-on itself only rebuilds every 5 min
 
 # key -> (name, unit, device_class, state_class, icon)

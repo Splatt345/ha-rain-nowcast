@@ -58,7 +58,7 @@ ENV PYTHONUNBUFFERED=1 \
     MALLOC_ARENA_MAX=2 \
     RADAR_CACHE_DIR=/data/cache
 
-EXPOSE 8099
+EXPOSE 8061
 CMD ["python", "-m", "nowcast.server"]
 
 ARG BUILD_ARCH

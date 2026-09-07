@@ -49,18 +49,17 @@
     letter-spacing: .07em; color: var(--muted); margin: 0; padding: 13px 16px 0;
   }
 
-  #map { height: 420px; background: var(--bg); }
-  /* Mute the basemap so the rain reads as the subject rather than competing
-     with road and landuse colours. Applied to the tile pane only, so the
-     radar overlay, the marker and the controls keep their real colours. */
-  #map .leaflet-tile-pane { filter: grayscale(0.85) brightness(1.06) contrast(0.92); }
-  @media (prefers-color-scheme: dark) {
-    /* invert gives a dark basemap from the same light tiles; the second
-       hue-rotate puts the few surviving hues back the right way round. */
-    #map .leaflet-tile-pane { filter: grayscale(0.9) invert(0.92) hue-rotate(180deg) brightness(0.95); }
-  }
+  /* The basemap is dark in both themes: rain is the subject, and it reads far
+     better over a dark map than over road and landuse colours. There is no
+     keyless dark tile server left - CARTO and Stadia both want an API key now,
+     and CARTO answers 200 with a watermark rather than an error - so the dark
+     map is made here, from the same light OSM tiles: invert, then hue-rotate
+     back so the few surviving hues are the right way round. Tile pane only, so
+     the radar overlay, the marker and the controls keep their real colours. */
+  #map { height: 420px; background: #12161c; }
+  #map .leaflet-tile-pane { filter: grayscale(.9) invert(.92) hue-rotate(180deg) brightness(.95) contrast(.92); }
   @media (max-width: 560px) { #map { height: 320px; } }
-  .leaflet-container { font: inherit; background: var(--bg); }
+  .leaflet-container { font: inherit; background: #12161c; }
 
   .controls {
     display: flex; align-items: center; gap: 12px;
@@ -299,7 +298,16 @@ function apply(next) {
     marker = L.circleMarker(state.location, {
       radius: 6, color: '#fff', weight: 2.5, fillColor: '#111', fillOpacity: .9
     }).addTo(map);
-    map.fitBounds(bounds.pad(-0.12));
+    // A point clicked earlier is remembered, but only while the location
+    // configured in the add-on is still the one it was chosen against -
+    // otherwise changing latitude/longitude in the options appears to do
+    // nothing, because the map keeps opening on the old click.
+    const home = store.get('home', null);
+    if (custom && (!home || home[0] !== state.location[0] || home[1] !== state.location[1])) {
+      custom = null; store.set('location', null);
+    }
+    store.set('home', state.location);
+    map.setView(custom || state.location, 9);
     $('opacity').value = store.get('opacity', 78);
     $('palette').innerHTML = Object.keys(state.palettes)
       .map(n => `<option value="${n}">${n.replace('-', ' ')}</option>`).join('');
@@ -390,6 +398,7 @@ function applyPoint() {
 function setLocation(lat, lon) {
   custom = [+lat.toFixed(4), +lon.toFixed(4)];
   store.set('location', custom);
+  store.set('home', state.location);
   marker.setLatLng(custom);
   applyPoint();
   refreshPoint(custom[0], custom[1]);
@@ -433,12 +442,17 @@ function drawChart() {
   // Two bands: 10-90 (the outer, faint) and 25-75 (inner, stronger). Rain is
   // skewed and bounded at zero, so these are percentiles of the 12 members
   // rather than mean +/- spread, which would put the lower edge below zero.
+  // Only ahead of "now": behind it every member carries the same observed
+  // radar, so the fan collapses onto the line and the probability is a bare
+  // 0/1 step - which drew as a solid block across the past hour.
+  const n0 = minutes.findIndex(m => m >= 0);
+  const fut = n0 < 0 ? [] : minutes.slice(n0);
   const { p10, p25, p75, p90 } = state.series;
-  if (p10 && p90) {
+  if (p10 && p90 && fut.length > 1) {
     const fan = (lowArr, highArr, alpha) => {
       g.beginPath();
-      minutes.forEach((m, i) => i ? g.lineTo(x(m), y(highArr[i])) : g.moveTo(x(m), y(highArr[i])));
-      for (let i = minutes.length - 1; i >= 0; i--) g.lineTo(x(minutes[i]), y(lowArr[i]));
+      fut.forEach((m, i) => i ? g.lineTo(x(m), y(highArr[n0 + i])) : g.moveTo(x(m), y(highArr[n0 + i])));
+      for (let i = fut.length - 1; i >= 0; i--) g.lineTo(x(fut[i]), y(lowArr[n0 + i]));
       g.closePath();
       g.fillStyle = css('--accent'); g.globalAlpha = alpha; g.fill(); g.globalAlpha = 1;
     };
@@ -465,13 +479,13 @@ function drawChart() {
   // members are wet at this minute. The line above is their mean, which is
   // smoother than any rain that actually falls - this is the honest spread.
   const prob = state.series.probability;
-  if (prob) {
+  if (prob && fut.length > 1) {
     const bandH = (h - padT - padB) * .18, base = h - padB;
     g.fillStyle = css('--accent'); g.globalAlpha = .3;
     g.beginPath();
-    g.moveTo(x(minutes[0]), base);
-    minutes.forEach((m, i) => g.lineTo(x(m), base - prob[i] * bandH));
-    g.lineTo(x(minutes.at(-1)), base);
+    g.moveTo(x(fut[0]), base);
+    fut.forEach((m, i) => g.lineTo(x(m), base - prob[n0 + i] * bandH));
+    g.lineTo(x(fut.at(-1)), base);
     g.closePath(); g.fill(); g.globalAlpha = 1;
   }
 

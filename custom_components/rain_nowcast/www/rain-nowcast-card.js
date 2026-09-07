@@ -19,6 +19,29 @@
  */
 
 const CARD = "rain-nowcast-card";
+const HOME_ZOOM = 9;          // roughly 100 km across: the useful nowcast range
+
+// Leaflet is served by the integration, not a CDN, and is loaded exactly once
+// no matter how many cards are on the dashboard. A promise rather than a
+// "script tag already there?" check: two cards built in the same frame, or one
+// rebuilt while the first load was still in flight, both used to find the tag
+// present, skip it, and then wait forever for an onload that was another
+// card's - which is why the map sometimes simply never appeared.
+let _leaflet = null;
+function loadLeaflet() {
+  if (window.L) return Promise.resolve();
+  if (!_leaflet) {
+    _leaflet = new Promise((ok, fail) => {
+      const js = document.createElement("script");
+      js.id = "rain-nowcast-leaflet";
+      js.src = "/rain_nowcast_static/leaflet.js";
+      js.onload = ok;
+      js.onerror = () => { _leaflet = null; fail(new Error("cannot load Leaflet")); };
+      document.head.appendChild(js);
+    });
+  }
+  return _leaflet;
+}
 
 class RainNowcastCard extends HTMLElement {
   constructor() {
@@ -96,6 +119,7 @@ class RainNowcastCard extends HTMLElement {
         ? this._config.palette : state.default_palette;
       this._lut = Uint8ClampedArray.from(state.palettes[this._palette]);
       this._alpha = Uint8ClampedArray.from(state.alpha_lut);
+      try { await loadLeaflet(); } catch (e) { this._note(e.message); }
       this._setupMap();
       state.frames.forEach((f) => this._load(f.name));
       if (changed || this._frame >= state.frames.length) this._frame = state.now_frame;
@@ -166,7 +190,7 @@ class RainNowcastCard extends HTMLElement {
 
   async _setPoint(latlng) {
     this._custom = latlng;
-    this._store("point", latlng);
+    this._store("point", latlng && { home: this._state.location, at: latlng });
     if (!latlng) {
       this._point = null;
       if (this._marker && this._state) this._marker.setLatLng(this._state.location);
@@ -198,6 +222,11 @@ class RainNowcastCard extends HTMLElement {
     if (this._map || !window.L) return;
     const el = this.shadowRoot.getElementById("map");
     this._map = L.map(el, { zoomControl: true, attributionControl: true });
+    // Plain OSM tiles, darkened in CSS below. The ready-made dark basemaps
+    // (CARTO, Stadia) all want an API key now - CARTO still answers 200, but
+    // the tile it returns is a "API KEY REQUIRED" watermark.
+    // maxZoom 12 because the radar is 1 km data: past that you magnify pixels
+    // rather than reveal anything.
     L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png", {
       maxZoom: 12, minZoom: 5,
       attribution: '&copy; OpenStreetMap contributors | radar: EUMETNET OPERA',
@@ -207,7 +236,6 @@ class RainNowcastCard extends HTMLElement {
     this._marker = L.circleMarker(this._state.location, {
       radius: 6, color: "#fff", weight: 2.5, fillColor: "#111", fillOpacity: 0.9,
     }).addTo(this._map);
-    this._map.fitBounds(b.pad(-0.12));
     this._map.on("click", (e) => this._setPoint([+e.latlng.lat.toFixed(4), +e.latlng.lng.toFixed(4)]));
 
     const sel = this.shadowRoot.getElementById("palette");
@@ -221,8 +249,17 @@ class RainNowcastCard extends HTMLElement {
     const op = this._recall("opacity", 78);
     this.shadowRoot.getElementById("opacity").value = op;
     this._overlay.setOpacity(op / 100);
+    // Open on the location configured in the add-on, not on the whole radar
+    // domain - the forecast is about one spot, so that is what the map shows.
+    // A point clicked earlier is remembered, but only while the configured
+    // location it was chosen against is still the current one.
+    const home = this._state.location;
     const saved = this._recall("point", null);
-    if (saved) this._setPoint(saved);
+    const fresh = saved && saved.home && saved.home[0] === home[0]
+                                      && saved.home[1] === home[1];
+    this._map.setView(fresh ? saved.at : home, HOME_ZOOM);
+    if (fresh) this._setPoint(saved.at);
+    else this._store("point", null);
     // Leaflet measures the container on creation; inside a dashboard the card
     // is often still being laid out at that point.
     setTimeout(() => this._map.invalidateSize(), 200);
@@ -304,12 +341,19 @@ class RainNowcastCard extends HTMLElement {
       g.fillText(label, padL - 4, Y(v));
     }
 
+    // The spread and the probability only exist ahead of "now": behind it every
+    // ensemble member carries the same observed radar, so the fan collapses to
+    // the line and the probability is a bare 0/1 step - which drew as a solid
+    // block over the whole past hour and read as a broken chart.
+    const n0 = minutes.findIndex((m) => m >= 0);
+    const fut = n0 < 0 ? [] : minutes.slice(n0);
+
     // uncertainty fan first, so the mean line always reads on top
     const fan = (lo, hi, alpha) => {
-      if (!lo || !hi) return;
+      if (!lo || !hi || fut.length < 2) return;
       g.beginPath();
-      minutes.forEach((m, i) => (i ? g.lineTo(X(m), Y(hi[i])) : g.moveTo(X(m), Y(hi[i]))));
-      for (let i = minutes.length - 1; i >= 0; i--) g.lineTo(X(minutes[i]), Y(lo[i]));
+      fut.forEach((m, i) => (i ? g.lineTo(X(m), Y(hi[n0 + i])) : g.moveTo(X(m), Y(hi[n0 + i]))));
+      for (let i = fut.length - 1; i >= 0; i--) g.lineTo(X(fut[i]), Y(lo[n0 + i]));
       g.closePath(); g.fillStyle = accent; g.globalAlpha = alpha; g.fill(); g.globalAlpha = 1;
     };
     fan(a.forecast_low, a.forecast_high, 0.16);
@@ -319,11 +363,11 @@ class RainNowcastCard extends HTMLElement {
     g.strokeStyle = accent; g.lineWidth = 1.8; g.stroke();
 
     // ensemble agreement along the bottom
-    if (a.forecast_probability) {
+    if (a.forecast_probability && fut.length > 1) {
       const band = (h - padT - padB) * 0.18, base = h - padB;
-      g.beginPath(); g.moveTo(X(minutes[0]), base);
-      minutes.forEach((m, i) => g.lineTo(X(m), base - a.forecast_probability[i] * band));
-      g.lineTo(X(minutes.at(-1)), base); g.closePath();
+      g.beginPath(); g.moveTo(X(fut[0]), base);
+      fut.forEach((m, i) => g.lineTo(X(m), base - a.forecast_probability[n0 + i] * band));
+      g.lineTo(X(fut.at(-1)), base); g.closePath();
       g.fillStyle = accent; g.globalAlpha = 0.3; g.fill(); g.globalAlpha = 1;
     }
 
@@ -359,8 +403,11 @@ class RainNowcastCard extends HTMLElement {
       <style>
         .head { display:flex; align-items:baseline; gap:10px; padding:12px 16px 6px; }
         .head .sum { font-weight:600; color:var(--primary-color); }
-        #map { height:${this._config.height}px; background:var(--card-background-color); }
-        #map .leaflet-tile-pane { filter:grayscale(.85) brightness(1.06) contrast(.92); }
+        #map { height:${this._config.height}px; background:#12161c; }
+        /* Dark basemap from light tiles: invert, then hue-rotate back so the
+           few surviving hues are the right way round. Tile pane only, so the
+           radar overlay and the marker keep their real colours. */
+        #map .leaflet-tile-pane { filter:grayscale(.9) invert(.92) hue-rotate(180deg) brightness(.95) contrast(.92); }
         .row { display:flex; align-items:center; gap:10px; padding:8px 16px; }
         #play { flex:none; width:30px; height:30px; border-radius:50%; border:0; cursor:pointer;
                 background:var(--primary-color); color:#fff; }
@@ -408,15 +455,6 @@ class RainNowcastCard extends HTMLElement {
     root.querySelector("#resetloc").onclick = () => this._setPoint(null);
     new ResizeObserver(() => { this._drawChart(); if (this._map) this._map.invalidateSize(); })
       .observe(root);
-
-    // Leaflet is served from the integration, not a CDN, and only once.
-    if (!window.L && !document.getElementById("rain-nowcast-leaflet")) {
-      const js = document.createElement("script");
-      js.id = "rain-nowcast-leaflet";
-      js.src = "/rain_nowcast_static/leaflet.js";
-      js.onload = () => { this._setupMap(); this._show(this._frame); };
-      document.head.appendChild(js);
-    }
   }
 
   _render() {

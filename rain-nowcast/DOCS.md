@@ -81,6 +81,14 @@ the right ones for "how hard". The shaded band along the bottom of the chart is
 the same number, minute by minute — full height means all twelve runs agree it
 rains then.
 
+### A dashboard card instead of this panel
+
+The repository's integration ships a Lovelace card with everything this panel
+has - animated radar, pan and zoom, colour schemes, opacity, the per-minute
+chart and tap-to-forecast-elsewhere - so the radar can live on a dashboard.
+Add `/rain_nowcast_static/rain-nowcast-card.js` as a JavaScript-module resource
+and use `type: custom:rain-nowcast-card`. See the repository README.
+
 ### No MQTT broker? Use the integration instead
 
 The repository ships a custom integration (`custom_components/rain_nowcast`)

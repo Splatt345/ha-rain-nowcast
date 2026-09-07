@@ -106,6 +106,36 @@ rather than stale when the add-on stops.
 > states it creates as ephemeral: **they disappear on every restart** until the
 > next radar frame. That is the limitation this integration removes.
 
+## The dashboard card
+
+The integration also ships a Lovelace card, so the radar lives on a dashboard
+instead of behind the ingress panel. It needs the integration (above), because
+the browser generally cannot reach the add-on directly - on Home Assistant OS
+the add-on has no published port - so Home Assistant proxies the radar frames
+under its own authentication.
+
+Nothing to copy: the integration serves the card itself. Add the resource once,
+at **Settings → Dashboards → ⋮ → Resources → Add**:
+
+    URL   /rain_nowcast_static/rain-nowcast-card.js
+    Type  JavaScript module
+
+then add a card to any dashboard:
+
+```yaml
+type: custom:rain-nowcast-card
+# all optional:
+height: 320          # map height in px
+show_chart: true     # the per-minute graph
+palette: viridis     # blue-green (default), viridis or classic
+entity: sensor.rain_nowcast_rain_summary
+```
+
+It has everything the panel has: animated radar with play/pause and a scrubber,
+pan and zoom, the colour schemes, an opacity slider, the per-minute chart with
+its uncertainty fan, and tap-the-map to forecast a different spot. Colour scheme,
+opacity and the chosen point are remembered per browser.
+
 ## After installing
 
 Set **`latitude`/`longitude`** to the spot you care about, paste the

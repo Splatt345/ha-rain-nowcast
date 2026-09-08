@@ -183,6 +183,60 @@ def resample(field, rows, cols, smooth=SMOOTH_PX):
     return map_coordinates(field, [rows, cols], order=1, mode="constant", cval=0.0)
 
 
+#: Width of the coarse motion grid handed to the browser. The flow is smooth
+#: at 1 km, so ~48 across Belgium bilinearly sampled is indistinguishable from
+#: the full field, and ships as ~20 KB of JSON rather than 3 MB.
+MOTION_GRID = 48
+
+
+def motion_for_display(motion, rows, cols, width=MOTION_GRID):
+    """Motion resampled onto the display raster, in DISPLAY pixels per timestep.
+
+    The browser uses this to advect the overlay between radar frames, so the map
+    can step a minute at a time even though radar only arrives every five.
+
+    Doing that here instead would mean rendering 121 PNGs per cycle rather than
+    25: measured at 17 s of CPU and 8 MB per refresh, against 9 ms and no
+    bandwidth to warp one frame in the browser. So the server ships the flow and
+    the browser does the work.
+
+    Two conversions, and both matter. `motion` is in SOURCE grid pixels per
+    timestep; the overlay is drawn on a Mercator raster whose pixels are a
+    different size, and a different size at each latitude. Dividing by the local
+    source-per-display pixel spacing - which `mercator_sampler` already encodes
+    in `rows`/`cols` - converts one to the other exactly, rather than assuming a
+    single scale factor for the whole domain.
+
+    Returns a dict of flat row-major lists, or None if there is no motion
+    estimate (in which case the browser snaps to whole frames instead).
+    """
+    if motion is None:
+        return None
+    from scipy.ndimage import map_coordinates
+
+    motion = np.nan_to_num(np.asarray(motion, dtype=float), nan=0.0)
+    h, w = rows.shape
+    sample = lambda a, r, c: map_coordinates(a, [r, c], order=1, mode="nearest")
+
+    # source pixels per timestep, at each display pixel
+    mx = sample(motion[0], rows, cols)          # source columns
+    my = sample(motion[1], rows, cols)          # source rows
+    # source pixels per display pixel, at each display pixel
+    dcol = np.gradient(cols, axis=1)
+    drow = np.gradient(rows, axis=0)
+    tiny = 1e-9
+    dx = mx / np.where(np.abs(dcol) < tiny, np.nan, dcol)
+    dy = my / np.where(np.abs(drow) < tiny, np.nan, drow)
+
+    gh = max(2, int(round(width * h / w)))
+    gy, gx = np.meshgrid(np.linspace(0, h - 1, gh),
+                         np.linspace(0, w - 1, width), indexing="ij")
+    coarse = lambda a: np.round(sample(np.nan_to_num(a, nan=0.0), gy, gx), 3)
+    return {"width": width, "height": gh,
+            "dx": coarse(dx).ravel().tolist(),
+            "dy": coarse(dy).ravel().tolist()}
+
+
 def point_rowcol(metadata, lat, lon):
     import pyproj
 
@@ -261,6 +315,21 @@ def _demo():
     assert rows.shape == (height, 64) and cols.shape == (height, 64)
     spacing = np.diff(rows[:, 0])
     assert not np.allclose(spacing, spacing[0], rtol=1e-4), "should be Mercator-spaced"
+
+    # Motion for the browser: a pure eastward source-grid flow must come back as
+    # a pure eastward display flow, and its magnitude must be the source speed
+    # divided by the source-pixels-per-display-pixel spacing. Checked against
+    # that spacing rather than against a remembered number, so it fails if the
+    # projection changes rather than if the constant does.
+    ny, nx = 90, 120
+    flow = np.stack([np.full((ny, nx), 3.0), np.zeros((ny, nx))])
+    disp = motion_for_display(flow, rows, cols, width=16)
+    assert disp["width"] == 16 and len(disp["dx"]) == 16 * disp["height"]
+    assert max(abs(v) for v in disp["dy"]) < 1e-6, "eastward flow must not drift north"
+    expect = 3.0 / np.median(np.gradient(cols, axis=1))
+    assert abs(np.median(disp["dx"]) - expect) < 0.05 * abs(expect), \
+        (np.median(disp["dx"]), expect)
+    assert motion_for_display(None, rows, cols) is None
     print("render self-check ok")
 
 

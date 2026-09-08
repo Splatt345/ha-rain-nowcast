@@ -221,6 +221,11 @@ class Nowcaster:
                          for name in render.PALETTES},
             "alpha_lut": render.alpha_lut().tolist(),
             "default_palette": render.DEFAULT_PALETTE,
+            # The flow the forecast itself moves along, in overlay pixels per
+            # interval, so the browser can advect between frames and step the
+            # map a minute at a time. See render.motion_for_display for why
+            # this is not done here.
+            "motion": render.motion_for_display(motion, rows, cols),
             **point,
         }
 

@@ -16,10 +16,22 @@
  * PNG frames carry an 8-bit rain LEVEL and no colour at all - the palette and
  * alpha tables arrive in the state and are applied here on a canvas, so
  * changing scheme is a repaint of frames already fetched.
+ *
+ * The timeline runs a MINUTE at a time even though radar arrives every five.
+ * The in-between minutes are advected here, in the browser, from the two
+ * neighbouring frames along the motion field the state ships - the same trick
+ * the add-on uses for the point curve, and for the same reason: rain does not
+ * fade in, it moves, so cross-fading two frames makes a shower arrive over five
+ * minutes instead of at the minute it arrives. Doing it server-side would mean
+ * 121 PNGs per cycle instead of 25, measured at 17 s of CPU and 8 MB per
+ * refresh; warping one frame here costs 9 ms and no bandwidth.
  */
 
 const CARD = "rain-nowcast-card";
 const HOME_ZOOM = 9;          // roughly 100 km across: the useful nowcast range
+const STEP_MS = 80;           // one minute of forecast per frame of animation
+
+const rel = (m) => (m === 0 ? "now" : m < 0 ? `${-m} min ago` : `in ${m} min`);
 
 // Leaflet is served by the integration, not a CDN, and is loaded exactly once
 // no matter how many cards are on the dashboard. A promise rather than a
@@ -47,10 +59,11 @@ class RainNowcastCard extends HTMLElement {
   constructor() {
     super();
     this.attachShadow({ mode: "open" });
-    this._frame = 0;
+    this._minute = 0;           // offset from now, in minutes: the whole timeline
     this._playing = true;
     this._raw = new Map();      // name -> decoded level PNG
     this._tinted = new Map();   // name -> data URL under the current palette
+    this._levels = new Map();   // name -> the level plane, for advecting
     this._canvas = document.createElement("canvas");
     this._built = false;
   }
@@ -114,7 +127,7 @@ class RainNowcastCard extends HTMLElement {
       if (state.status !== "ok") { this._note("Waiting for the first radar frame…"); return; }
       const changed = !this._state || this._state.updated !== state.updated;
       this._state = state;
-      if (changed) { this._raw.clear(); this._tinted.clear(); }
+      if (changed) { this._raw.clear(); this._tinted.clear(); this._levels.clear(); }
       this._palette = this._config.palette && state.palettes[this._config.palette]
         ? this._config.palette : state.default_palette;
       this._lut = Uint8ClampedArray.from(state.palettes[this._palette]);
@@ -122,8 +135,12 @@ class RainNowcastCard extends HTMLElement {
       try { await loadLeaflet(); } catch (e) { this._note(e.message); }
       this._setupMap();
       state.frames.forEach((f) => this._load(f.name));
-      if (changed || this._frame >= state.frames.length) this._frame = state.now_frame;
-      this._show(this._frame);
+      const sc = this.shadowRoot.getElementById("scrub");
+      sc.min = state.frames[0].offset;
+      sc.max = state.frames[state.frames.length - 1].offset;
+      sc.step = 1;
+      if (changed) this._minute = 0;
+      this._showMinute(this._minute);
       this._play(this._playing);
       this._note("");
     } catch (err) {
@@ -183,7 +200,7 @@ class RainNowcastCard extends HTMLElement {
     this._store("palette", name);
     const sel = this.shadowRoot.getElementById("palette");
     if (sel) sel.value = name;
-    this._show(this._frame);
+    this._showMinute(this._minute);
   }
 
   // --- forecast somewhere else ---------------------------------------------
@@ -265,21 +282,122 @@ class RainNowcastCard extends HTMLElement {
     setTimeout(() => this._map.invalidateSize(), 200);
   }
 
-  _show(i) {
-    if (!this._state) return;
-    this._frame = i;
-    const f = this._state.frames[i];
-    const url = this._tint(f.name);
-    if (url && this._overlay) this._overlay.setUrl(url);
-    else this._load(f.name).then(() => {
-      if (this._frame === i && this._overlay) {
-        const u = this._tint(f.name); if (u) this._overlay.setUrl(u);
+  _levelPlane(name) {
+    // Advecting needs random access to the pixels, which an <img> cannot give,
+    // so the level byte is read out of each frame once and kept.
+    if (this._levels.has(name)) return this._levels.get(name);
+    const img = this._raw.get(name);
+    if (!img) return null;
+    const c = this._canvas;
+    c.width = img.naturalWidth; c.height = img.naturalHeight;
+    const g = c.getContext("2d", { willReadFrequently: true });
+    g.clearRect(0, 0, c.width, c.height);
+    g.drawImage(img, 0, 0);
+    const d = g.getImageData(0, 0, c.width, c.height).data;
+    const lv = new Uint8Array(c.width * c.height);
+    for (let i = 0, j = 0; i < d.length; i += 4, j++) lv[j] = d[i];
+    const plane = { w: c.width, h: c.height, data: lv };
+    this._levels.set(name, plane);
+    return plane;
+  }
+
+  _warp(k, d) {
+    // The overlay a fraction `d` of the way from frame k to frame k+1: trace
+    // each pixel back along the flow to where that air was at k, and forward to
+    // where it lands at k+1, then blend. Same scheme as the add-on's
+    // interpolate.point_series, applied to the whole raster.
+    //
+    // Blended in LEVEL rather than in mm/h, because the level is all the
+    // browser has - a geometric rather than arithmetic mean of the two rates.
+    // The two samples are the same echo seen from either side, so they only
+    // differ where rain is growing or decaying, and one level step is a few
+    // percent of a rate.
+    const F = this._state.frames, mo = this._state.motion;
+    const A = this._levelPlane(F[k].name), B = this._levelPlane(F[k + 1].name);
+    if (!mo || !A || !B || A.w !== B.w || A.h !== B.h) return null;
+    if (!(mo.width > 1 && mo.height > 1)) return null;
+    const w = A.w, h = A.h, a = A.data, b = B.data;
+    if (!this._lut || !this._alpha) return null;
+
+    const samp = (src, x, y) => {
+      if (!(x > 0)) x = 0; else if (x > w - 1) x = w - 1;
+      if (!(y > 0)) y = 0; else if (y > h - 1) y = h - 1;
+      const x0 = x | 0, y0 = y | 0, tx = x - x0, ty = y - y0;
+      const x1 = x0 < w - 1 ? x0 + 1 : x0, y1 = y0 < h - 1 ? y0 + 1 : y0;
+      const r0 = y0 * w, r1 = y1 * w;
+      return src[r0 + x0] * (1 - tx) * (1 - ty) + src[r0 + x1] * tx * (1 - ty)
+           + src[r1 + x0] * (1 - tx) * ty + src[r1 + x1] * tx * ty;
+    };
+
+    const out = new Uint8Array(w * h);
+    const MW = mo.width, MH = mo.height, mdx = mo.dx, mdy = mo.dy;
+    for (let y = 0; y < h; y++) {
+      const fy = y / (h - 1) * (MH - 1);
+      let y0 = fy | 0; if (y0 > MH - 2) y0 = MH - 2;
+      const ty = fy - y0, r0 = y0 * MW, r1 = r0 + MW;
+      for (let x = 0; x < w; x++) {
+        const fx = x / (w - 1) * (MW - 1);
+        let x0 = fx | 0; if (x0 > MW - 2) x0 = MW - 2;
+        const tx = fx - x0;
+        const w00 = (1 - tx) * (1 - ty), w10 = tx * (1 - ty);
+        const w01 = (1 - tx) * ty, w11 = tx * ty;
+        const vx = mdx[r0 + x0] * w00 + mdx[r0 + x0 + 1] * w10
+                 + mdx[r1 + x0] * w01 + mdx[r1 + x0 + 1] * w11;
+        const vy = mdy[r0 + x0] * w00 + mdy[r0 + x0 + 1] * w10
+                 + mdy[r1 + x0] * w01 + mdy[r1 + x0 + 1] * w11;
+        const back = samp(a, x - vx * d, y - vy * d);
+        const fwd = samp(b, x + vx * (1 - d), y + vy * (1 - d));
+        out[y * w + x] = ((1 - d) * back + d * fwd + 0.5) | 0;
       }
+    }
+    return { w, h, data: out };
+  }
+
+  _paint(plane) {
+    // Level plane -> a tinted PNG, the same colouring _tint does for a whole
+    // frame. Kept apart from _warp so the advection can be checked as
+    // arithmetic, without a palette and a PNG round-trip in the way.
+    if (!plane) return null;
+    const { w, h, data } = plane, lut = this._lut, alpha = this._alpha;
+    const c = this._canvas;
+    c.width = w; c.height = h;
+    const g = c.getContext("2d", { willReadFrequently: true });
+    const out = g.createImageData(w, h), px = out.data;
+    for (let i = 0, o = 0; i < data.length; i++, o += 4) {
+      const l = data[i], j = l * 3;
+      px[o] = lut[j]; px[o + 1] = lut[j + 1]; px[o + 2] = lut[j + 2];
+      px[o + 3] = alpha[l];
+    }
+    g.putImageData(out, 0, 0);
+    return c.toDataURL("image/png");
+  }
+
+  _between(k, d) { return this._paint(this._warp(k, d)); }
+
+  _showMinute(m) {
+    if (!this._state) return;
+    const F = this._state.frames;
+    m = Math.round(Math.max(F[0].offset, Math.min(F[F.length - 1].offset, m)));
+    this._minute = m;
+
+    let k = 0;
+    while (k + 1 < F.length && F[k + 1].offset <= m) k++;
+    const span = k + 1 < F.length ? F[k + 1].offset - F[k].offset : 0;
+    const d = span > 0 ? (m - F[k].offset) / span : 0;
+
+    let url = d < 1e-6 ? this._tint(F[k].name) : this._between(k, d);
+    // No motion estimate, or a neighbour not fetched yet: the nearer real frame
+    // is still the truth, it just repeats for a few minutes.
+    if (!url) url = this._tint(F[d < 0.5 ? k : Math.min(k + 1, F.length - 1)].name);
+    if (url && this._overlay) this._overlay.setUrl(url);
+    else if (!this._raw.has(F[k].name)) this._load(F[k].name).then(() => {
+      if (this._minute === m) this._showMinute(m);
     });
-    const when = new Date(f.time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    const rel = f.offset === 0 ? "now" : (f.offset < 0 ? `${-f.offset} min ago` : `in ${f.offset} min`);
-    this.shadowRoot.getElementById("stamp").textContent = `${when} · ${rel}`;
-    this.shadowRoot.getElementById("scrub").value = i;
+
+    const at = new Date(new Date(F[0].time).getTime() + (m - F[0].offset) * 60000);
+    const when = at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    this.shadowRoot.getElementById("stamp").textContent = `${when} · ${rel(m)}`;
+    this.shadowRoot.getElementById("scrub").value = m;
     this._drawChart();
   }
 
@@ -290,9 +408,10 @@ class RainNowcastCard extends HTMLElement {
     clearInterval(this._timer);
     if (on && this._state) {
       this._timer = setInterval(() => {
-        const last = this._state.frames.length - 1;
-        this._show(this._frame >= last ? 0 : this._frame + 1);
-      }, 300);
+        const F = this._state.frames;
+        const last = F[F.length - 1].offset;
+        this._showMinute(this._minute >= last ? F[0].offset : this._minute + 1);
+      }, STEP_MS);
     }
   }
 
@@ -325,6 +444,9 @@ class RainNowcastCard extends HTMLElement {
     g.clearRect(0, 0, w, h);
 
     const padL = 30, padR = 8, padT = 8, padB = 18;
+    // Kept so a pointer position can be turned back into a minute; the chart is
+    // the only thing that knows where the axis actually is.
+    this._geom = { padL, padR, m0: minutes[0], m1: minutes.at(-1) };
     const LO = 0.05, HI = 50;
     const norm = (v) => (v < LO ? 0 : Math.log10(v / LO) / Math.log10(HI / LO));
     const X = (m) => padL + (m - minutes[0]) / (minutes.at(-1) - minutes[0]) * (w - padL - padR);
@@ -375,9 +497,10 @@ class RainNowcastCard extends HTMLElement {
     g.beginPath(); g.moveTo(X(0), padT); g.lineTo(X(0), h - padB); g.stroke();
     g.setLineDash([]);
     if (this._state) {
-      const cur = this._state.frames[this._frame].offset;
       g.strokeStyle = accent; g.lineWidth = 2;
-      g.beginPath(); g.moveTo(X(cur), padT); g.lineTo(X(cur), h - padB); g.stroke();
+      g.beginPath();
+      g.moveTo(X(this._minute), padT); g.lineTo(X(this._minute), h - padB);
+      g.stroke();
     }
     g.fillStyle = css("--secondary-text-color").trim() || "#888";
     g.textBaseline = "top";
@@ -385,6 +508,43 @@ class RainNowcastCard extends HTMLElement {
       g.textAlign = m === minutes[0] ? "left" : (m === minutes.at(-1) ? "right" : "center");
       g.fillText(m === 0 ? "now" : `${m > 0 ? "+" : ""}${m}`, X(m), h - padB + 4);
     }
+  }
+
+  // --- reading the graph ----------------------------------------------------
+
+  _minuteAt(e) {
+    const cv = this.shadowRoot.getElementById("chart"), gm = this._geom;
+    if (!cv || !gm) return null;
+    const r = cv.getBoundingClientRect();
+    const span = r.width - gm.padL - gm.padR;
+    if (span <= 0) return null;
+    const f = Math.max(0, Math.min(1, (e.clientX - r.left - gm.padL) / span));
+    return Math.round(gm.m0 + f * (gm.m1 - gm.m0));
+  }
+
+  _tip(e) {
+    const tip = this.shadowRoot.getElementById("tip");
+    if (!tip) return;
+    const a = e && this._attrs();
+    const m = e && this._minuteAt(e);
+    if (!a || m === null || !a.forecast_minutes) { tip.style.opacity = 0; return; }
+    const mins = a.forecast_minutes;
+    const stepM = mins.length > 1 ? mins[1] - mins[0] : 1;
+    const i = Math.round((m - mins[0]) / stepM);
+    if (!(i >= 0 && i < mins.length)) { tip.style.opacity = 0; return; }
+    const v = a.forecast_values[i];
+    const lo = a.forecast_low && a.forecast_low[i];
+    const hi = a.forecast_high && a.forecast_high[i];
+    // The spread is only meaningful ahead of now - behind it every member
+    // carries the same observed radar - so it is shown only there.
+    const band = (m > 0 && lo != null && hi != null && hi - lo > 0.05)
+      ? ` (${lo.toFixed(1)}\u2013${hi.toFixed(1)})` : "";
+    const p = a.forecast_probability;
+    tip.textContent = `${v.toFixed(2)}${band} mm/h \u00b7 ${rel(m)}`
+      + (p && m > 0 ? ` \u00b7 ${Math.round(p[i] * 100)}% of runs wet` : "");
+    const box = this.shadowRoot.querySelector(".chartbox").getBoundingClientRect();
+    tip.style.left = `${e.clientX - box.left}px`;
+    tip.style.opacity = 1;
   }
 
   // --- DOM -----------------------------------------------------------------
@@ -414,6 +574,14 @@ class RainNowcastCard extends HTMLElement {
         #scrub { flex:1; accent-color:var(--primary-color); min-width:0; }
         #stamp { flex:none; font-size:.85rem; font-variant-numeric:tabular-nums; }
         #chart { display:block; width:100%; height:150px; }
+        .chartbox { position:relative; }
+        #tip {
+          position:absolute; top:8px; transform:translateX(-50%); opacity:0;
+          pointer-events:none; transition:opacity .12s; white-space:nowrap;
+          background:var(--card-background-color); color:var(--primary-text-color);
+          border:1px solid var(--divider-color); border-radius:6px;
+          padding:2px 7px; font-size:.78rem; font-variant-numeric:tabular-nums;
+        }
         #note { display:none; padding:8px 16px; color:var(--error-color,#b00); font-size:.85rem; }
         .chartbox { padding:0 8px 10px; }
         .opts { flex-wrap:wrap; font-size:.8rem; color:var(--secondary-text-color); padding-top:0; }
@@ -430,7 +598,8 @@ class RainNowcastCard extends HTMLElement {
       <div id="map"></div>
       <div class="row">
         <button id="play" aria-label="Play or pause">❚❚</button>
-        <input id="scrub" type="range" min="0" max="0" value="0" aria-label="Radar time">
+        <input id="scrub" type="range" min="-60" max="60" step="1" value="0"
+               aria-label="Radar time, in minutes from now">
         <span id="stamp">--:--</span>
       </div>
       <div class="row opts">
@@ -441,18 +610,38 @@ class RainNowcastCard extends HTMLElement {
         <button id="resetloc" hidden>My location</button>
       </div>
       <div class="chartbox" ${this._config.show_chart ? "" : "hidden"}>
+        <div id="tip"></div>
         <canvas id="chart"></canvas>
       </div>`;
     this.shadowRoot.append(css, root);
 
     root.querySelector("#play").onclick = () => this._play(!this._playing);
-    root.querySelector("#scrub").oninput = (e) => { this._play(false); this._show(+e.target.value); };
+    root.querySelector("#scrub").oninput = (e) => { this._play(false); this._showMinute(+e.target.value); };
     root.querySelector("#palette").onchange = (e) => this._usePalette(e.target.value);
     root.querySelector("#opacity").oninput = (e) => {
       if (this._overlay) this._overlay.setOpacity(e.target.value / 100);
       this._store("opacity", +e.target.value);
     };
     root.querySelector("#resetloc").onclick = () => this._setPoint(null);
+
+    // Reading the graph: hover for the exact numbers, tap or drag to take the
+    // radar to that minute. Hover deliberately does NOT move the map - having
+    // it jump every time the pointer crosses the card is worse than useless on
+    // a dashboard you are only passing over.
+    const box = root.querySelector(".chartbox");
+    const seek = (e) => {
+      const m = this._minuteAt(e);
+      if (m !== null) { this._play(false); this._showMinute(m); }
+    };
+    box.addEventListener("pointerdown", (e) => {
+      seek(e);
+      // Drag-to-scrub off the edge of the card. Not every pointer id can be
+      // captured, and failing to is not a reason to lose the tap.
+      try { box.setPointerCapture(e.pointerId); } catch (err) { /* fine */ }
+    });
+    box.addEventListener("pointermove", (e) => { this._tip(e); if (e.buttons & 1) seek(e); });
+    box.addEventListener("pointerleave", () => this._tip(null));
+    box.addEventListener("pointercancel", () => this._tip(null));
     new ResizeObserver(() => { this._drawChart(); if (this._map) this._map.invalidateSize(); })
       .observe(root);
   }
@@ -462,7 +651,6 @@ class RainNowcastCard extends HTMLElement {
     const s = this._hass.states[this._entity];
     const el = this.shadowRoot.getElementById("summary");
     if (el) el.textContent = s ? s.state : "Rain Nowcast not set up";
-    if (this._state) this.shadowRoot.getElementById("scrub").max = this._state.frames.length - 1;
     this._drawChart();
   }
 

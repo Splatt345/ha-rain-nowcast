@@ -425,7 +425,8 @@ class RainNowcastCard extends HTMLElement {
       const s = this._point.series;
       return { forecast_minutes: s.minutes, forecast_values: s.values,
                forecast_probability: s.probability,
-               forecast_low: s.p10, forecast_high: s.p90 };
+               forecast_low: s.p10, forecast_high: s.p90,
+               forecast_min: s.pmin, forecast_max: s.pmax };
     }
     const st = this._hass && this._entity && this._hass.states[this._entity];
     return st ? st.attributes : null;

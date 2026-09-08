@@ -8,6 +8,7 @@ import datetime
 import glob
 import json
 import os
+import signal
 import threading
 import time
 import traceback
@@ -495,15 +496,48 @@ class Handler(BaseHTTPRequestHandler):
         pass
 
 
+def install_stop(server):
+    """Stop cleanly on SIGTERM, which is how the Supervisor stops an add-on.
+
+    Without this the add-on "crashes" every single time you press Stop. The
+    process is PID 1 in its container, and the kernel does NOT apply the default
+    action for a signal to PID 1 - it delivers it only if a handler exists. With
+    no handler, SIGTERM is dropped, the Supervisor waits out its grace period and
+    then SIGKILLs, which is reported as an unclean exit.
+
+    shutdown() has to run off-thread: it blocks until serve_forever returns, and
+    serve_forever is the thread the handler interrupts, so calling it here would
+    deadlock the stop it is trying to perform.
+    """
+    def stop(signum, _frame):
+        print(f"stopping on {signal.Signals(signum).name}", flush=True)
+        threading.Thread(target=server.shutdown, daemon=True).start()
+
+    for sig in (signal.SIGTERM, signal.SIGINT):
+        signal.signal(sig, stop)
+
+
 def main():
     opts = load_options()
     os.makedirs(live.CACHE_DIR, exist_ok=True)
     print(f"Rain Nowcast starting on :{PORT} for {opts['latitude']},{opts['longitude']}")
+    # Whether the key actually arrived, which the add-on's config tab cannot
+    # always be trusted to show. Last four characters only - enough to tell a
+    # missing key from a wrong one without putting a secret in the log.
+    key = os.environ.get("ORD_API_KEY", "")
+    print(f"MeteoGate API key: {'set, ...' + key[-4:] if key else 'NOT SET'}"
+          + ("" if key else " - anonymous radar access is rate-limited and will"
+                           " mostly fail; set api_key in the add-on config"),
+          flush=True)
 
     nowcaster = Nowcaster(opts)
     threading.Thread(target=nowcaster.loop, daemon=True).start()
     Handler.nowcaster = nowcaster
-    ThreadingHTTPServer(("0.0.0.0", PORT), Handler).serve_forever()
+    server = ThreadingHTTPServer(("0.0.0.0", PORT), Handler)
+    install_stop(server)
+    server.serve_forever()
+    server.server_close()
+    print("stopped cleanly", flush=True)
 
 
 def _demo():
@@ -547,6 +581,17 @@ def _demo():
         for a, b in zip(order, order[1:]):
             assert (sp[a] <= sp[b] + 1e-9).all(), (a, b)
         assert (sp["pmin"] <= line + 1e-9).all() and (sp["pmax"] >= line - 1e-9).all()
+
+    # Pressing Stop must end the process, not sit there until it is killed.
+    server = ThreadingHTTPServer(("127.0.0.1", 0), BaseHTTPRequestHandler)
+    serving = threading.Thread(target=server.serve_forever)
+    serving.start()
+    install_stop(server)
+    os.kill(os.getpid(), signal.SIGTERM)
+    serving.join(timeout=5)
+    assert not serving.is_alive(), "SIGTERM did not stop serve_forever"
+    server.server_close()
+    signal.signal(signal.SIGTERM, signal.SIG_DFL)
     print("server self-check ok")
 
 

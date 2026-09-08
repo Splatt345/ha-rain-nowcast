@@ -179,3 +179,16 @@ wrong. Check the add-on log; anonymous access will not sustain a 5-min poll.
 Check the graph: if it reads "Dry for the next 60 minutes", that is the answer.
 
 **Slow or high CPU** — lower `ensemble_members`.
+
+**The API key looks blank in the Configuration tab** — check whether it is
+actually gone before retyping it. The add-on prints what it received on every
+start:
+
+    MeteoGate API key: set, ...4f2a
+
+If that line says `NOT SET`, the option really is empty and needs pasting
+again. If it shows the last four characters of your key, the key is stored and
+working, and only the input box is showing it as empty. The Supervisor's own
+copy settles it either way, from **Terminal & SSH**:
+
+    ha addons info local_rain_nowcast | grep -A20 options

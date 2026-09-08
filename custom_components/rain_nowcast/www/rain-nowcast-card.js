@@ -487,17 +487,26 @@ class RainNowcastCard extends HTMLElement {
     };
     fan(a.forecast_low, a.forecast_high, 0.16);
 
-    // Outline the edges. A translucent fill fades out gradually, so the one
-    // thing the band exists to say - this is as bad as it gets - had no line
-    // you could actually point at.
-    const edge = (arr) => {
+    // The outright envelope: no member of the ensemble went above the upper
+    // line or below the lower one. Lines rather than another shaded band -
+    // these are the noisiest thing on the chart, one member each out of twelve,
+    // and should not look as solid as the percentiles they bracket.
+    const edge = (arr, label) => {
       if (!arr || fut.length < 2) return;
       g.beginPath();
       fut.forEach((m, i) => (i ? g.lineTo(X(m), Y(arr[n0 + i])) : g.moveTo(X(m), Y(arr[n0 + i]))));
-      g.strokeStyle = accent; g.globalAlpha = 0.55; g.lineWidth = 1;
-      g.setLineDash([3, 2]); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+      g.strokeStyle = accent; g.globalAlpha = 0.75; g.lineWidth = 1.1;
+      g.setLineDash([4, 3]); g.stroke(); g.setLineDash([]);
+      // Above its own line when the line runs along the axis, or the label
+      // lands on top of the "+60" tick.
+      const ly = Y(arr[minutes.length - 1]);
+      const above = label === "max" || ly > h - padB - 14;
+      g.fillStyle = ink; g.textAlign = "right";
+      g.textBaseline = above ? "bottom" : "top";
+      g.fillText(label, w - padR - 2, ly + (above ? -3 : 3));
+      g.globalAlpha = 1;
     };
-    edge(a.forecast_high); edge(a.forecast_low);
+    edge(a.forecast_max, "max"); edge(a.forecast_min, "min");
 
     g.beginPath();
     minutes.forEach((m, i) => (i ? g.lineTo(X(m), Y(values[i])) : g.moveTo(X(m), Y(values[i]))));
@@ -530,14 +539,14 @@ class RainNowcastCard extends HTMLElement {
 
     // Name the worst minute outright: reading a number off a log axis by eye is
     // hopeless, and "how hard could it get" is the question being asked.
-    const hi = a.forecast_high, lo = a.forecast_low;
+    const hi = a.forecast_max, lo = a.forecast_min;
     if (hi && lo && fut.length > 1) {
       let k = n0;
       for (let i = n0; i < minutes.length; i++) if (hi[i] > hi[k]) k = i;
       if (hi[k] >= 0.05) {
         const fmt = (v) => (v >= 10 ? v.toFixed(0) : v.toFixed(1));
-        const px = Math.min(w - padR, Math.max(padL, X(minutes[k])));
-        g.textAlign = px > w - padR - 40 ? "right" : (px < padL + 40 ? "left" : "center");
+        const px = Math.min(w - padR - 20, Math.max(padL, X(minutes[k])));
+        g.textAlign = px < padL + 40 ? "left" : "center";
         g.fillStyle = accent; g.textBaseline = "bottom";
         g.fillText(`up to ${fmt(hi[k])}`, px, Math.max(Y(hi[k]) - 3, padT + 9));
         g.fillStyle = muted; g.textBaseline = "top";

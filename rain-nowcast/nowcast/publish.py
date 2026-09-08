@@ -93,6 +93,8 @@ def payload(state):
         "forecast_probability": state["series"].get("probability"),
         "forecast_low": state["series"].get("p10"),
         "forecast_high": state["series"].get("p90"),
+        "forecast_min": state["series"].get("pmin"),
+        "forecast_max": state["series"].get("pmax"),
         "latitude": state["location"][0],
         "longitude": state["location"][1],
     }

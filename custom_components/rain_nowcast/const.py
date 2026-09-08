@@ -54,4 +54,5 @@ BINARY_SENSORS = {"raining": ("Raining", "moisture")}
 
 #: Carried as attributes on the summary entity, exactly as the MQTT path does.
 FORECAST_ATTRS = ("forecast_minutes", "forecast_values", "forecast_probability",
-                  "forecast_low", "forecast_high", "latitude", "longitude")
+                  "forecast_low", "forecast_high", "forecast_min", "forecast_max",
+                  "latitude", "longitude")

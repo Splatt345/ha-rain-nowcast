@@ -89,6 +89,36 @@ def prune_cache():
                 pass
 
 
+def _spread(member_curves, series):
+    """The ensemble's disagreement about the RATE: envelope and percentiles.
+
+    Percentiles rather than mean +/- sd, because rain is heavily skewed and
+    bounded below at zero - a symmetric interval would put the lower edge
+    underground and understate the upper tail.
+
+    pmin/pmax are the outright envelope: no member went below one or above the
+    other, which is the honest answer to "how bad could this get". They are the
+    noisiest thing here, being a single member each out of twelve, which is why
+    they are drawn as lines and the percentiles as the shaded band.
+
+    The mean can sit OUTSIDE the 10-90 band, and legitimately so: rain is
+    skewed, and one wet member among eleven dry ones drags the mean above the
+    90th percentile (measured: mean 0.006 against p90 0.005). Correct
+    statistics, but on screen it draws the main line outside its own band,
+    which reads as a bug - so every bound is widened to contain the line. It
+    still contains every percentile it claims to.
+    """
+    lo, q1, q3, hi = np.percentile(member_curves, [10, 25, 75, 90], axis=0)
+    return {
+        "pmin": np.minimum(member_curves.min(axis=0), series),
+        "p10": np.minimum(lo, series),
+        "p25": np.minimum(q1, series),
+        "p75": np.maximum(q3, series),
+        "p90": np.maximum(hi, series),
+        "pmax": np.maximum(member_curves.max(axis=0), series),
+    }
+
+
 class Nowcaster:
     def __init__(self, opts):
         self.opts = opts
@@ -340,15 +370,7 @@ class Nowcaster:
         # dry. Percentiles rather than mean +/- sd: rain is heavily skewed and
         # bounded below at zero, so a symmetric interval would put the lower
         # edge underground and understate the upper tail.
-        lo, q1, q3, hi = np.percentile(member_curves, [10, 25, 75, 90], axis=0)
-        # The mean can sit OUTSIDE the 10-90 band, and legitimately so: rain is
-        # skewed, and one wet member among eleven dry ones drags the mean above
-        # the 90th percentile (measured: mean 0.006 against p90 0.005). Correct
-        # statistics, but on screen it draws the main line outside its own band,
-        # which reads as a bug. Widen the band to contain the line - it still
-        # contains every percentile it claims to.
-        lo = np.minimum(lo, series)
-        hi = np.maximum(hi, series)
+        spread = _spread(member_curves, series)
 
         return {
             "location": [lat, lon],
@@ -357,10 +379,8 @@ class Nowcaster:
                 "minutes": minutes.tolist(),
                 "values": [round(float(v), 3) for v in series],
                 "probability": [round(float(p), 2) for p in probability],
-                "p10": [round(float(v), 3) for v in lo],
-                "p25": [round(float(v), 3) for v in q1],
-                "p75": [round(float(v), 3) for v in q3],
-                "p90": [round(float(v), 3) for v in hi],
+                **{k: [round(float(v), 3) for v in a]
+                   for k, a in spread.items()},
             },
             "rain_chance": round(
                 float(probability[int(np.searchsorted(minutes, 0)):].max()), 2),
@@ -517,6 +537,16 @@ def _demo():
     assert members.shape == (4, 3, 64, 64), members.shape
     assert motion.shape == (2, 64, 64), motion.shape
     assert np.allclose(np.nanmean(members, axis=0), mean, equal_nan=True)
+
+    # The envelope has to nest, and has to contain the line it is drawn around,
+    # or the chart draws a mean outside its own "minimum possible".
+    curves = np.abs(rng.gamma(1.0, 2.0, size=(12, n)))
+    for line in (curves.mean(axis=0), flat(0.0), curves.max(axis=0) * 2):
+        sp = _spread(curves, line)
+        order = ["pmin", "p10", "p25", "p75", "p90", "pmax"]
+        for a, b in zip(order, order[1:]):
+            assert (sp[a] <= sp[b] + 1e-9).all(), (a, b)
+        assert (sp["pmin"] <= line + 1e-9).all() and (sp["pmax"] >= line - 1e-9).all()
     print("server self-check ok")
 
 

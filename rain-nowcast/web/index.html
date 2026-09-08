@@ -414,9 +414,10 @@ function apply(next) {
     `minute it arrives. Values are averaged over ~3 km around your location. The shaded ` +
     `band at the bottom is how many of the ${state.n_members ?? 12} forecast members are ` +
     `wet at that minute — full height means they all agree it rains. The shaded ` +
-    `spread around the line is where 8 of 10, and 5 of 10, of the forecast runs land, the ` +
-    `dashed edges being the outer pair: ` +
-    `a wide band means the models disagree about how hard it will rain.`;
+    `spread around the line is where 8 of 10, and 5 of 10, of the forecast runs land: ` +
+    `a wide band means the models disagree about how hard it will rain. The dashed lines ` +
+    `marked min and max are the wettest and driest single runs - nothing went outside them, ` +
+    `but each is one run out of ${state.n_members ?? 12}, so treat them as the outside chance.`;
 }
 
 function showMinute(m) {
@@ -544,7 +545,7 @@ function drawChart() {
   // 0/1 step - which drew as a solid block across the past hour.
   const n0 = minutes.findIndex(m => m >= 0);
   const fut = n0 < 0 ? [] : minutes.slice(n0);
-  const { p10, p25, p75, p90 } = state.series;
+  const { p10, p25, p75, p90, pmin, pmax } = state.series;
   if (p10 && p90 && fut.length > 1) {
     const fan = (lowArr, highArr, alpha) => {
       g.beginPath();
@@ -572,18 +573,29 @@ function drawChart() {
   minutes.forEach((m, i) => i ? g.lineTo(x(m), y(values[i])) : g.moveTo(x(m), y(values[i])));
   g.stroke();
 
-  // Outline the fan's outer edges, on top of the rain area rather than under
-  // it: a translucent fill fades out gradually, so the one thing the band
-  // exists to say - this is as bad as it gets - had no line to point at, and
-  // the lower edge was buried under the area fill entirely.
-  if (p10 && p90 && fut.length > 1) {
-    const edge = arr => {
+  // The outright envelope: no member of the ensemble went above the upper line
+  // or below the lower one. Drawn on top of the rain area rather than under it,
+  // where the lower one was buried by the fill entirely.
+  //
+  // Lines rather than another shaded band, because these are the noisiest thing
+  // on the chart - one member each out of twelve - and should not look as solid
+  // as the percentiles they bracket.
+  if (pmin && pmax && fut.length > 1) {
+    const edge = (arr, label) => {
       g.beginPath();
       fut.forEach((m, i) => i ? g.lineTo(x(m), y(arr[n0 + i])) : g.moveTo(x(m), y(arr[n0 + i])));
-      g.strokeStyle = css('--accent'); g.globalAlpha = .7; g.lineWidth = 1;
-      g.setLineDash([3, 2]); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+      g.strokeStyle = css('--accent'); g.globalAlpha = .75; g.lineWidth = 1.1;
+      g.setLineDash([4, 3]); g.stroke(); g.setLineDash([]);
+      // Above its own line when the line runs along the axis, or the label
+      // lands on top of the "+60" tick.
+      const ly = y(arr[minutes.length - 1]);
+      const above = label === 'max' || ly > h - padB - 14;
+      g.fillStyle = css('--ink');   // accent is unreadable against the rain area
+      g.textAlign = 'right'; g.textBaseline = above ? 'bottom' : 'top';
+      g.fillText(label, w - padR - 2, ly + (above ? -3 : 3));
+      g.globalAlpha = 1;
     };
-    edge(p90); edge(p10);
+    edge(pmax, 'max'); edge(pmin, 'min');
   }
 
   // Ensemble agreement as a band along the bottom: how many of the 12 STEPS
@@ -610,18 +622,18 @@ function drawChart() {
 
   // Name the worst minute outright: reading a number off a log axis by eye is
   // hopeless, and "how hard could it get" is the question being asked.
-  if (p10 && p90 && fut.length > 1) {
+  if (pmin && pmax && fut.length > 1) {
     let k = n0;
-    for (let i = n0; i < minutes.length; i++) if (p90[i] > p90[k]) k = i;
-    if (p90[k] >= 0.05) {
+    for (let i = n0; i < minutes.length; i++) if (pmax[i] > pmax[k]) k = i;
+    if (pmax[k] >= 0.05) {
       const fmt = v => v >= 10 ? v.toFixed(0) : v.toFixed(1);
-      const px = Math.min(w - padR, Math.max(padL, x(minutes[k])));
-      g.textAlign = px > w - padR - 50 ? 'right' : (px < padL + 50 ? 'left' : 'center');
+      const px = Math.min(w - padR - 24, Math.max(padL, x(minutes[k])));
+      g.textAlign = px < padL + 50 ? 'left' : 'center';
       g.fillStyle = css('--accent'); g.textBaseline = 'bottom';
-      g.fillText(`up to ${fmt(p90[k])} mm/h`, px, Math.max(y(p90[k]) - 4, padT + 10));
+      g.fillText(`up to ${fmt(pmax[k])} mm/h`, px, Math.max(y(pmax[k]) - 4, padT + 10));
       g.fillStyle = css('--ink'); g.textBaseline = 'top';
-      g.fillText(p10[k] < 0.05 ? 'or nothing at all' : `at least ${fmt(p10[k])}`,
-                 px, Math.min(y(p10[k]) + 4, h - padB - 12));
+      g.fillText(pmin[k] < 0.05 ? 'or nothing at all' : `at least ${fmt(pmin[k])}`,
+                 px, Math.min(y(pmin[k]) + 4, h - padB - 12));
     }
   }
 

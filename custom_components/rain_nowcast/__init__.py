@@ -37,10 +37,19 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # frames (the browser cannot reach the add-on directly); the static path
     # carries the Lovelace card and its copy of Leaflet, which are public assets
     # and need no authentication.
+    #
+    # cache_headers=False, deliberately. True sets a max-age of a month, and a
+    # Lovelace resource URL has no version in it - so after updating the
+    # integration the browser keeps serving the OLD card for weeks, with no
+    # refresh strong enough to dislodge it short of editing the resource URL.
+    # Without the header the file is revalidated and answered with a 304 when
+    # unchanged, which for one 40 KB script is a fair trade for updates that
+    # actually arrive. Leaflet is behind the same path and never changes, so it
+    # pays the same revalidation for nothing; that is one conditional GET.
     if not hass.data[DOMAIN].get("_http"):
         hass.http.register_view(RainNowcastProxyView(hass))
         await hass.http.async_register_static_paths([
-            StaticPathConfig(STATIC_URL, str(Path(__file__).parent / "www"), True)
+            StaticPathConfig(STATIC_URL, str(Path(__file__).parent / "www"), False)
         ])
         hass.data[DOMAIN]["_http"] = True
 

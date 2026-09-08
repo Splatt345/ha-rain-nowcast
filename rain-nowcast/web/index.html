@@ -414,7 +414,8 @@ function apply(next) {
     `minute it arrives. Values are averaged over ~3 km around your location. The shaded ` +
     `band at the bottom is how many of the ${state.n_members ?? 12} forecast members are ` +
     `wet at that minute — full height means they all agree it rains. The shaded ` +
-    `spread around the line is where 8 of 10, and 5 of 10, of the forecast runs land: ` +
+    `spread around the line is where 8 of 10, and 5 of 10, of the forecast runs land, the ` +
+    `dashed edges being the outer pair: ` +
     `a wide band means the models disagree about how hard it will rain.`;
 }
 
@@ -512,7 +513,10 @@ function drawChart() {
   g.clearRect(0, 0, w, h);
 
   const { minutes, values } = state.series;
-  const padL = 34, padR = 10, padT = 12, padB = 22;
+  // Numbers on the axis when there is room for them; "heavy" alone tells you
+  // nothing you can compare a forecast against.
+  const wide = w > 340;
+  const padL = wide ? 58 : 34, padR = 10, padT = 16, padB = 22;
   const x = m => padL + (m - minutes[0]) / (minutes.at(-1) - minutes[0]) * (w - padL - padR);
   const y = v => h - padB - norm(v) * (h - padT - padB);
 
@@ -522,8 +526,10 @@ function drawChart() {
   for (const [v, label] of [[0.1, 'light'], [1, 'mod'], [5, 'heavy'], [20, 'violent']]) {
     g.strokeStyle = css('--line'); g.lineWidth = 1;
     g.beginPath(); g.moveTo(padL, y(v) + .5); g.lineTo(w - padR, y(v) + .5); g.stroke();
-    g.fillStyle = css('--muted'); g.fillText(label, padL - 6, y(v));
+    g.fillStyle = css('--muted');
+    g.fillText(wide ? `${v} ${label}` : `${v}`, padL - 6, y(v));
   }
+  g.textBaseline = 'top'; g.fillText('mm/h', padL - 6, 2); g.textBaseline = 'middle';
 
   // Shade the forecast half so past and future are never confused.
   g.fillStyle = dark ? 'rgba(255,255,255,.035)' : 'rgba(16,32,48,.035)';
@@ -566,6 +572,20 @@ function drawChart() {
   minutes.forEach((m, i) => i ? g.lineTo(x(m), y(values[i])) : g.moveTo(x(m), y(values[i])));
   g.stroke();
 
+  // Outline the fan's outer edges, on top of the rain area rather than under
+  // it: a translucent fill fades out gradually, so the one thing the band
+  // exists to say - this is as bad as it gets - had no line to point at, and
+  // the lower edge was buried under the area fill entirely.
+  if (p10 && p90 && fut.length > 1) {
+    const edge = arr => {
+      g.beginPath();
+      fut.forEach((m, i) => i ? g.lineTo(x(m), y(arr[n0 + i])) : g.moveTo(x(m), y(arr[n0 + i])));
+      g.strokeStyle = css('--accent'); g.globalAlpha = .7; g.lineWidth = 1;
+      g.setLineDash([3, 2]); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+    };
+    edge(p90); edge(p10);
+  }
+
   // Ensemble agreement as a band along the bottom: how many of the 12 STEPS
   // members are wet at this minute. The line above is their mean, which is
   // smoother than any rain that actually falls - this is the honest spread.
@@ -587,6 +607,23 @@ function drawChart() {
   const cur = minute;
   g.strokeStyle = css('--accent'); g.lineWidth = 2;
   g.beginPath(); g.moveTo(x(cur), padT); g.lineTo(x(cur), h - padB); g.stroke();
+
+  // Name the worst minute outright: reading a number off a log axis by eye is
+  // hopeless, and "how hard could it get" is the question being asked.
+  if (p10 && p90 && fut.length > 1) {
+    let k = n0;
+    for (let i = n0; i < minutes.length; i++) if (p90[i] > p90[k]) k = i;
+    if (p90[k] >= 0.05) {
+      const fmt = v => v >= 10 ? v.toFixed(0) : v.toFixed(1);
+      const px = Math.min(w - padR, Math.max(padL, x(minutes[k])));
+      g.textAlign = px > w - padR - 50 ? 'right' : (px < padL + 50 ? 'left' : 'center');
+      g.fillStyle = css('--accent'); g.textBaseline = 'bottom';
+      g.fillText(`up to ${fmt(p90[k])} mm/h`, px, Math.max(y(p90[k]) - 4, padT + 10));
+      g.fillStyle = css('--ink'); g.textBaseline = 'top';
+      g.fillText(p10[k] < 0.05 ? 'or nothing at all' : `at least ${fmt(p10[k])}`,
+                 px, Math.min(y(p10[k]) + 4, h - padB - 12));
+    }
+  }
 
   // Time axis.
   g.fillStyle = css('--muted'); g.textBaseline = 'top';

@@ -443,7 +443,10 @@ class RainNowcastCard extends HTMLElement {
     g.setTransform(dpr, 0, 0, dpr, 0, 0);
     g.clearRect(0, 0, w, h);
 
-    const padL = 30, padR = 8, padT = 8, padB = 18;
+    // Numbers on the axis when there is room for them; "heavy" alone tells you
+    // nothing you can compare a forecast against.
+    const wide = w > 340;
+    const padL = wide ? 52 : 30, padR = 8, padT = 14, padB = 18;
     // Kept so a pointer position can be turned back into a minute; the chart is
     // the only thing that knows where the axis actually is.
     this._geom = { padL, padR, m0: minutes[0], m1: minutes.at(-1) };
@@ -457,11 +460,15 @@ class RainNowcastCard extends HTMLElement {
 
     g.strokeStyle = css("--divider-color").trim() || "#ddd";
     g.font = "10px system-ui, sans-serif"; g.textAlign = "right"; g.textBaseline = "middle";
-    for (const [v, label] of [[0.1, "light"], [1, "mod"], [5, "heavy"]]) {
+    const muted = css("--secondary-text-color").trim() || "#888";
+    for (const [v, label] of [[0.1, "light"], [1, "mod"], [5, "heavy"], [20, "violent"]]) {
       g.beginPath(); g.moveTo(padL, Y(v) + 0.5); g.lineTo(w - padR, Y(v) + 0.5); g.stroke();
-      g.fillStyle = css("--secondary-text-color").trim() || "#888";
-      g.fillText(label, padL - 4, Y(v));
+      g.fillStyle = muted;
+      g.fillText(wide ? `${v} ${label}` : `${v}`, padL - 4, Y(v));
     }
+    g.textBaseline = "top";
+    g.fillText("mm/h", padL - 4, 1);
+    g.textBaseline = "middle";
 
     // The spread and the probability only exist ahead of "now": behind it every
     // ensemble member carries the same observed radar, so the fan collapses to
@@ -479,6 +486,18 @@ class RainNowcastCard extends HTMLElement {
       g.closePath(); g.fillStyle = accent; g.globalAlpha = alpha; g.fill(); g.globalAlpha = 1;
     };
     fan(a.forecast_low, a.forecast_high, 0.16);
+
+    // Outline the edges. A translucent fill fades out gradually, so the one
+    // thing the band exists to say - this is as bad as it gets - had no line
+    // you could actually point at.
+    const edge = (arr) => {
+      if (!arr || fut.length < 2) return;
+      g.beginPath();
+      fut.forEach((m, i) => (i ? g.lineTo(X(m), Y(arr[n0 + i])) : g.moveTo(X(m), Y(arr[n0 + i]))));
+      g.strokeStyle = accent; g.globalAlpha = 0.55; g.lineWidth = 1;
+      g.setLineDash([3, 2]); g.stroke(); g.setLineDash([]); g.globalAlpha = 1;
+    };
+    edge(a.forecast_high); edge(a.forecast_low);
 
     g.beginPath();
     minutes.forEach((m, i) => (i ? g.lineTo(X(m), Y(values[i])) : g.moveTo(X(m), Y(values[i]))));
@@ -507,6 +526,24 @@ class RainNowcastCard extends HTMLElement {
     for (const m of minutes.filter((m) => m % 30 === 0)) {
       g.textAlign = m === minutes[0] ? "left" : (m === minutes.at(-1) ? "right" : "center");
       g.fillText(m === 0 ? "now" : `${m > 0 ? "+" : ""}${m}`, X(m), h - padB + 4);
+    }
+
+    // Name the worst minute outright: reading a number off a log axis by eye is
+    // hopeless, and "how hard could it get" is the question being asked.
+    const hi = a.forecast_high, lo = a.forecast_low;
+    if (hi && lo && fut.length > 1) {
+      let k = n0;
+      for (let i = n0; i < minutes.length; i++) if (hi[i] > hi[k]) k = i;
+      if (hi[k] >= 0.05) {
+        const fmt = (v) => (v >= 10 ? v.toFixed(0) : v.toFixed(1));
+        const px = Math.min(w - padR, Math.max(padL, X(minutes[k])));
+        g.textAlign = px > w - padR - 40 ? "right" : (px < padL + 40 ? "left" : "center");
+        g.fillStyle = accent; g.textBaseline = "bottom";
+        g.fillText(`up to ${fmt(hi[k])}`, px, Math.max(Y(hi[k]) - 3, padT + 9));
+        g.fillStyle = muted; g.textBaseline = "top";
+        g.fillText(lo[k] < 0.05 ? "or nothing at all" : `at least ${fmt(lo[k])}`,
+                   px, Math.min(Y(lo[k]) + 3, h - padB - 11));
+      }
     }
   }
 

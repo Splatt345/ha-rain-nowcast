@@ -347,6 +347,22 @@ function loadFrame(name) {
 const hhmm = iso => new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 const relative = m => m === 0 ? 'now' : (m < 0 ? `${-m} min ago` : `in ${m} min`);
 
+// How old the newest radar frame already is, in minutes.
+//
+// Minute 0 of the data is that FRAME, not the present moment: OPERA composites
+// arrive every five minutes and then take a few more to publish, so by the time
+// anyone looks at this the newest picture is typically 5-10 minutes old.
+// Reading minute 0 as "now" put the clock here about five minutes behind the
+// one on the wall.
+//
+// From the browser's clock rather than a number computed by the server,
+// because it keeps ageing between polls. Capped both ways so a wrong clock, or
+// radar that has stopped arriving, cannot drag the timeline somewhere absurd.
+const lagMinutes = () => {
+  const u = state && Date.parse(state.updated);
+  return u ? Math.max(0, Math.min(60, Math.floor((Date.now() - u) / 60000))) : 0;
+};
+
 // Same log scale the radar colours use, so the chart and the map agree.
 const LO = 0.05, HI = 50;
 const norm = v => v < LO ? 0 : Math.log10(v / LO) / Math.log10(HI / LO);
@@ -405,7 +421,9 @@ function apply(next) {
   $('scrub').min = state.frames[0].offset;
   $('scrub').max = state.frames[state.frames.length - 1].offset;
   $('scrub').step = 1;
-  if (first) { minute = 0; play(true); }
+  // Not 0: that is the last radar frame, several minutes ago. The present
+  // minute is a short extrapolation of it, which is what the forecast is.
+  if (first) { minute = lagMinutes(); play(true); }
   showMinute(minute);
   drawChart();
   $('chartnote').textContent =
@@ -439,7 +457,7 @@ function showMinute(m) {
 
   const at = new Date(new Date(F[0].time).getTime() + (m - F[0].offset) * 60000);
   $('scrub').value = m;
-  $('stamp').innerHTML = `${hhmm(at)}<small>${relative(m)}</small>`;
+  $('stamp').innerHTML = `${hhmm(at)}<small>${relative(m - lagMinutes())}</small>`;
   drawChart();
 }
 
@@ -532,7 +550,10 @@ function drawChart() {
   }
   g.textBaseline = 'top'; g.fillText('mm/h', padL - 6, 2); g.textBaseline = 'middle';
 
-  // Shade the forecast half so past and future are never confused.
+  const lag = lagMinutes();
+  // Shade the forecast half so past and future are never confused. Anchored at
+  // minute 0 - the last observed frame - not at the "now" line, so the gap
+  // between the two shows the minutes that are already extrapolated.
   g.fillStyle = dark ? 'rgba(255,255,255,.035)' : 'rgba(16,32,48,.035)';
   g.fillRect(x(0), padT, w - padR - x(0), h - padT - padB);
 
@@ -614,7 +635,7 @@ function drawChart() {
 
   // "Now" divider and the frame the map is currently showing.
   g.strokeStyle = css('--ink'); g.lineWidth = 1.5; g.setLineDash([3, 3]);
-  g.beginPath(); g.moveTo(x(0), padT); g.lineTo(x(0), h - padB); g.stroke();
+  g.beginPath(); g.moveTo(x(lag), padT); g.lineTo(x(lag), h - padB); g.stroke();
   g.setLineDash([]);
   const cur = minute;
   g.strokeStyle = css('--accent'); g.lineWidth = 2;
@@ -639,9 +660,13 @@ function drawChart() {
 
   // Time axis.
   g.fillStyle = css('--muted'); g.textBaseline = 'top';
-  for (const m of minutes.filter(m => m % 15 === 0)) {
-    g.textAlign = m === minutes[0] ? 'left' : (m === minutes.at(-1) ? 'right' : 'center');
-    g.fillText(m === 0 ? 'now' : `${m > 0 ? '+' : ''}${m}`, x(m), h - padB + 6);
+  // Ticks on round minutes FROM NOW, not from the radar frame, so the axis
+  // agrees with the labels everywhere else on the page.
+  for (let d = Math.ceil((minutes[0] - lag) / 15) * 15; d <= minutes.at(-1) - lag; d += 15) {
+    const at = d + lag;
+    g.textAlign = at <= minutes[0] + 2 ? 'left'
+                : (at >= minutes.at(-1) - 2 ? 'right' : 'center');
+    g.fillText(d === 0 ? 'now' : `${d > 0 ? '+' : ''}${d}`, x(at), h - padB + 6);
   }
 }
 
@@ -659,7 +684,7 @@ $('chartbox').addEventListener('pointermove', e => {
   const p = state.series.probability, lo = state.series.p10, hi = state.series.p90;
   const range = (lo && hi && hi[i] - lo[i] > 0.05)
     ? ` (${lo[i].toFixed(1)}–${hi[i].toFixed(1)})` : '';
-  tip.textContent = `${values[i].toFixed(2)}${range} mm/h · ${relative(minutes[i])}`
+  tip.textContent = `${values[i].toFixed(2)}${range} mm/h · ${relative(minutes[i] - lagMinutes())}`
     + (p ? ` · ${Math.round(p[i] * 100)}% of members wet` : '');
   // Take the map to that exact minute, not to the nearest radar frame.
   play(false);

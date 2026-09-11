@@ -10,6 +10,7 @@ Two routes, in order of preference:
    restart (this republishes them on the next radar frame, so at most a few
    minutes of absence).
 """
+import datetime
 import json
 import os
 
@@ -42,12 +43,39 @@ ENTITIES = {
 BINARY = {"raining": ("Raining", "moisture")}
 
 
+def frame_age(state):
+    """Minutes since the radar frame this forecast was built from.
+
+    Minute 0 of the series is that frame, NOT the present moment: OPERA
+    composites come on a 5-minute cadence and then take a few minutes to
+    publish, so a forecast is typically 5-10 minutes old before anyone reads
+    it. Counting "minutes until rain" from minute 0 is therefore that much
+    late, which is the difference between watering the garden and not.
+
+    Computed per call rather than stored, because this endpoint is polled: the
+    answer keeps ageing until the next radar frame lands.
+    """
+    try:
+        updated = datetime.datetime.fromisoformat(state["updated"])
+    except (KeyError, TypeError, ValueError):
+        return 0
+    if updated.tzinfo is None:
+        updated = updated.replace(tzinfo=datetime.timezone.utc)
+    delta = datetime.datetime.now(datetime.timezone.utc) - updated
+    # Capped: a wrong clock either side must not silently throw the whole
+    # forecast away, and beyond an hour there is nothing left to report on.
+    return int(min(60, max(0, round(delta.total_seconds() / 60))))
+
+
 def metrics(state):
     """Derive the automation-useful numbers from a finished nowcast state."""
     minutes = np.array(state["series"]["minutes"])
     values = np.array(state["series"]["values"])
-    now = int(np.searchsorted(minutes, 0))
-    ahead, future = minutes[now:], values[now:]
+    age = frame_age(state)
+    now = int(np.searchsorted(minutes, age))
+    # Everything below is phrased as "in N minutes", so the axis is shifted to
+    # start from now rather than from the radar timestamp.
+    ahead, future = minutes[now:] - age, values[now:]
 
     raining = bool(future[0] >= RAIN_THRESHOLD)
     wet = np.flatnonzero(future >= RAIN_THRESHOLD)
@@ -269,6 +297,15 @@ def _demo():
     m = metrics(state(vals))
     assert m["raining"] is False, m
     assert m["minutes_until_rain"] == 20, m
+    # The same forecast read six minutes later: the rain is six minutes nearer.
+    # Without this the sensors are always as stale as the radar's publishing
+    # lag, which is what made the widget disagree with the wall clock.
+    stale = state(vals)
+    stale["updated"] = (datetime.datetime.now(datetime.timezone.utc)
+                        - datetime.timedelta(minutes=6)).isoformat()
+    assert frame_age(stale) == 6, frame_age(stale)
+    assert metrics(stale)["minutes_until_rain"] == 14, metrics(stale)
+    assert metrics(stale)["horizon_minutes"] == 54
     assert m["peak_rate"] == 4.0
     # 41 minutes of 4 mm/h -> 41/60 * 4 mm
     assert abs(m["expected_rain"] - 41 * 4 / 60) < 0.02, m

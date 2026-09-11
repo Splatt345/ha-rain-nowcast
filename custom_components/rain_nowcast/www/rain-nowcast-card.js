@@ -139,7 +139,10 @@ class RainNowcastCard extends HTMLElement {
       sc.min = state.frames[0].offset;
       sc.max = state.frames[state.frames.length - 1].offset;
       sc.step = 1;
-      if (changed) this._minute = 0;
+      // Not 0: that is the last radar frame, several minutes ago. The present
+      // minute is a short extrapolation of it, which is exactly what the
+      // forecast frames are for.
+      if (changed) this._minute = this._lag();
       this._showMinute(this._minute);
       this._play(this._playing);
       this._note("");
@@ -374,6 +377,24 @@ class RainNowcastCard extends HTMLElement {
 
   _between(k, d) { return this._paint(this._warp(k, d)); }
 
+  // How old the newest radar frame already is, in minutes.
+  //
+  // Minute 0 of the data is that FRAME, not the present moment: OPERA
+  // composites arrive every five minutes and then take a few more to publish,
+  // so by the time anyone looks at this the newest picture is typically 5-10
+  // minutes old. Reading minute 0 as "now" is what put the clock on this card
+  // about five minutes behind the one on the wall.
+  //
+  // Live from the browser's own clock rather than a number from the server,
+  // because it keeps ageing between polls.
+  _lag() {
+    const u = this._state && Date.parse(this._state.updated);
+    if (!u) return 0;
+    // Capped both ways: a browser clock that is wrong, or radar that has
+    // stopped arriving, must not drag the whole timeline somewhere absurd.
+    return Math.max(0, Math.min(60, Math.floor((Date.now() - u) / 60000)));
+  }
+
   _showMinute(m) {
     if (!this._state) return;
     const F = this._state.frames;
@@ -396,7 +417,7 @@ class RainNowcastCard extends HTMLElement {
 
     const at = new Date(new Date(F[0].time).getTime() + (m - F[0].offset) * 60000);
     const when = at.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    this.shadowRoot.getElementById("stamp").textContent = `${when} · ${rel(m)}`;
+    this.shadowRoot.getElementById("stamp").textContent = `${when} · ${rel(m - this._lag())}`;
     this.shadowRoot.getElementById("scrub").value = m;
     this._drawChart();
   }
@@ -522,8 +543,9 @@ class RainNowcastCard extends HTMLElement {
       g.fillStyle = accent; g.globalAlpha = 0.3; g.fill(); g.globalAlpha = 1;
     }
 
+    const lag = this._lag();
     g.strokeStyle = ink; g.lineWidth = 1.2; g.setLineDash([3, 3]);
-    g.beginPath(); g.moveTo(X(0), padT); g.lineTo(X(0), h - padB); g.stroke();
+    g.beginPath(); g.moveTo(X(lag), padT); g.lineTo(X(lag), h - padB); g.stroke();
     g.setLineDash([]);
     if (this._state) {
       g.strokeStyle = accent; g.lineWidth = 2;
@@ -533,9 +555,14 @@ class RainNowcastCard extends HTMLElement {
     }
     g.fillStyle = css("--secondary-text-color").trim() || "#888";
     g.textBaseline = "top";
-    for (const m of minutes.filter((m) => m % 30 === 0)) {
-      g.textAlign = m === minutes[0] ? "left" : (m === minutes.at(-1) ? "right" : "center");
-      g.fillText(m === 0 ? "now" : `${m > 0 ? "+" : ""}${m}`, X(m), h - padB + 4);
+    // Ticks on round minutes FROM NOW, not from the radar frame, so the axis
+    // agrees with the labels everywhere else on the card.
+    const first = Math.ceil((minutes[0] - lag) / 30) * 30;
+    for (let d = first; d <= minutes.at(-1) - lag; d += 30) {
+      const at = d + lag;
+      g.textAlign = at <= minutes[0] + 2 ? "left"
+                  : (at >= minutes.at(-1) - 2 ? "right" : "center");
+      g.fillText(d === 0 ? "now" : `${d > 0 ? "+" : ""}${d}`, X(at), h - padB + 4);
     }
 
     // Name the worst minute outright: reading a number off a log axis by eye is
@@ -587,7 +614,7 @@ class RainNowcastCard extends HTMLElement {
     const band = (m > 0 && lo != null && hi != null && hi - lo > 0.05)
       ? ` (${lo.toFixed(1)}\u2013${hi.toFixed(1)})` : "";
     const p = a.forecast_probability;
-    tip.textContent = `${v.toFixed(2)}${band} mm/h \u00b7 ${rel(m)}`
+    tip.textContent = `${v.toFixed(2)}${band} mm/h \u00b7 ${rel(m - this._lag())}`
       + (p && m > 0 ? ` \u00b7 ${Math.round(p[i] * 100)}% of runs wet` : "");
     const box = this.shadowRoot.querySelector(".chartbox").getBoundingClientRect();
     tip.style.left = `${e.clientX - box.left}px`;

@@ -230,6 +230,11 @@ class Nowcaster:
             "stack": stack, "forecast": forecast, "members": members,
             "motion": motion, "metadata": metadata, "interval": interval,
             "offsets": offsets, "minutes": np.arange(offsets[0], offsets[-1] + 1),
+            # How old the newest frame already is, so wording like "in 20 min"
+            # counts from now rather than from the radar timestamp.
+            "age": max(0, round(
+                (datetime.datetime.now(datetime.timezone.utc)
+                 - last_time).total_seconds() / 60)),
         }
         point = self._point_state(opts["latitude"], opts["longitude"], ctx)
 
@@ -385,13 +390,19 @@ class Nowcaster:
             },
             "rain_chance": round(
                 float(probability[int(np.searchsorted(minutes, 0)):].max()), 2),
-            "summary": self._summary(minutes, series, probability),
+            "summary": self._summary(minutes, series, probability,
+                                     age=ctx.get("age", 0)),
         }
 
     @staticmethod
-    def _summary(minutes, series, probability):
-        now = int(np.searchsorted(minutes, 0))
-        future, ahead = series[now:], minutes[now:]
+    def _summary(minutes, series, probability, age=0):
+        # `age` is how old the newest radar frame already is. Minute 0 of the
+        # series is that frame, not the present moment - OPERA composites come
+        # on a 5-minute cadence and then take a few minutes to publish - so
+        # without this the wording is a few minutes behind the clock the reader
+        # is holding: "starting in 20 min" for rain that lands in 14.
+        now = int(np.searchsorted(minutes, age))
+        future, ahead = series[now:], minutes[now:] - age
         chance = int(round(100 * probability[now:].max()))
         if future[0] >= RAIN_THRESHOLD:
             dry = np.flatnonzero(future < RAIN_THRESHOLD)
@@ -557,6 +568,12 @@ def _demo():
     s = Nowcaster._summary(minutes, np.where(minutes >= 20, 4.0, 0.0),
                            np.where(minutes >= 20, 0.75, 0.0))
     assert "starting in 20 min (75% chance)" in s and "up to 4.0" in s, s
+    # The same forecast, read six minutes after the radar frame it came from:
+    # the rain is six minutes closer, and saying otherwise is what made the
+    # widget disagree with the clock beside it.
+    s = Nowcaster._summary(minutes, np.where(minutes >= 20, 4.0, 0.0),
+                           np.where(minutes >= 20, 0.75, 0.0), age=6)
+    assert "starting in 14 min" in s, s
 
     # The contract refresh() leans on: the extras really are the members the
     # mean was taken over, so the probability band and the rate line above it

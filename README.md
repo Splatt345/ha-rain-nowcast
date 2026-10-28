@@ -55,11 +55,12 @@ build compiles pysteps from source and takes several minutes.
 **Settings → Add-ons → Add-on Store → ⋮ → Repositories**, add
 
 ```
-https://github.com/Splatt345/rain-nowcast-android#home-assistant
+https://github.com/Splatt345/ha-rain-nowcast
 ```
 
-(`#home-assistant` is the branch that holds the add-on; `main` is the Android
-app), then install Rain Nowcast from the section that appears.
+then install Rain Nowcast from the section that appears. The Android app, which
+runs the same nowcast on a phone, is at
+[Splatt345/rain-nowcast-android](https://github.com/Splatt345/rain-nowcast-android).
 
 ### C. Home Assistant Container or docker-compose — no Supervisor
 

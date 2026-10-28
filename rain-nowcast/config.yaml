@@ -3,7 +3,7 @@ name: Rain Nowcast
 version: "1.1.0"
 slug: rain_nowcast
 description: Live rain radar and a 60-minute minute-by-minute rain forecast
-url: https://github.com/Splatt345/rain-nowcast-android/tree/home-assistant
+url: https://github.com/Splatt345/ha-rain-nowcast
 ingress: true
 ingress_port: 8061
 panel_icon: mdi:weather-pouring

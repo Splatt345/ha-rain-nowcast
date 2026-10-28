@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 *.npz
 optimize_log.jsonl
+.claude/settings.local.json

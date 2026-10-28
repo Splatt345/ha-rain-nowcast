@@ -52,12 +52,14 @@ build compiles pysteps from source and takes several minutes.
 
 ### B. Home Assistant OS or Supervised — from a Git repository
 
-Push this repository somewhere Home Assistant can reach, then **Settings →
-Add-ons → Add-on Store → ⋮ → Repositories**, paste the URL, and install Rain
-Nowcast from the section that appears.
+**Settings → Add-ons → Add-on Store → ⋮ → Repositories**, add
 
-> This repository has no remote configured yet, so option A is the one that
-> works right now. `git remote add origin …` and push first for option B.
+```
+https://github.com/Splatt345/rain-nowcast-android#home-assistant
+```
+
+(`#home-assistant` is the branch that holds the add-on; `main` is the Android
+app), then install Rain Nowcast from the section that appears.
 
 ### C. Home Assistant Container or docker-compose — no Supervisor
 
